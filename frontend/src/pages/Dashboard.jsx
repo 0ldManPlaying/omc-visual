@@ -1,30 +1,92 @@
-import { useStore } from '../stores/useStore';
-import { useState } from 'react';
+import { useStore, apiUrl } from '../stores/useStore';
+import { useState, useEffect } from 'react';
 import { Bot, Cpu, Activity, Clock, Zap, ArrowUp, ArrowDown, Minus, Eye, Server, GitCommit, MessageSquare, Rocket, Download, Play, Pause, Square, Check, AlertCircle, Loader } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
+function countActiveAgents(session, stateEvents, hudData) {
+  if (!session) return 0;
+  for (let i = stateEvents.length - 1; i >= 0; i--) {
+    const e = stateEvents[i];
+    if (e.type === 'team_state' && Array.isArray(e.data?.workers) && e.data.workers.length > 0) {
+      return e.data.workers.length;
+    }
+  }
+  if (hudData && typeof hudData === 'object' && !Array.isArray(hudData)) {
+    if (Number.isFinite(Number(hudData.activeAgents))) return Number(hudData.activeAgents);
+    if (Array.isArray(hudData.agents)) return hudData.agents.length;
+    if (Number.isFinite(Number(hudData.workerCount))) return Number(hudData.workerCount);
+  }
+  return 1;
+}
+
+function isStartedToday(isoStartedAt) {
+  if (!isoStartedAt) return false;
+  const d = new Date(isoStartedAt);
+  if (Number.isNaN(d.getTime())) return false;
+  const now = new Date();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
+}
+
 export default function Dashboard() {
   const {
-    serverStatus, connected, session, workerEvents, stateEvents,
-    clawhipInstall, installClawhip, startClawhipDaemon, stopClawhipDaemon, scaffoldClawhipConfig,
-    stopSession, killSession,
+    serverStatus,
+    connected,
+    session,
+    workerEvents,
+    stateEvents,
+    hudData,
+    activeServer,
+    clawhipInstall,
+    installClawhip,
+    startClawhipDaemon,
+    stopClawhipDaemon,
+    scaffoldClawhipConfig,
+    stopSession,
+    killSession,
   } = useStore();
   const navigate = useNavigate();
   const omc = serverStatus?.omc;
   const clawhip = serverStatus?.clawhip;
 
+  const [sessionsToday, setSessionsToday] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(apiUrl('/api/history/sessions?limit=200'));
+        const data = await res.json();
+        if (cancelled) return;
+        const list = Array.isArray(data.sessions) ? data.sessions : [];
+        const n = list.filter((s) => isStartedToday(s.started_at)).length;
+        setSessionsToday(n);
+      } catch {
+        if (!cancelled) setSessionsToday(0);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeServer]);
+
+  const activeAgents = countActiveAgents(session, stateEvents, hudData);
+
   const stats = [
     {
       label: 'Active agents',
-      value: session ? '32' : '0',
+      value: String(activeAgents),
       trend: session ? 'up' : 'neutral',
       trendValue: session ? 'Running' : 'Idle',
     },
     {
       label: 'Sessions today',
-      value: '1',
-      trend: 'up',
-      trendValue: '+1',
+      value: String(sessionsToday),
+      trend: sessionsToday > 0 ? 'up' : 'neutral',
+      trendValue: sessionsToday > 0 ? `+${sessionsToday}` : '—',
     },
     {
       label: 'Exec mode',

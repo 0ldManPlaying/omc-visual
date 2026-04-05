@@ -76,7 +76,7 @@ export default function MissionControl() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(apiUrl('/api/status/'));
+        const res = await fetch(apiUrl('/api/status'));
         const data = await res.json();
         if (cancelled || !data?.paths) return;
         const { suggestedWorkdir, homeDir } = data.paths;

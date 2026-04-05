@@ -20,7 +20,7 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import { AnsiUp } from 'ansi_up';
-import { useStore } from '../stores/useStore';
+import { useStore, apiUrl } from '../stores/useStore';
 
 const CLI_ANYTHING_GITHUB = 'https://github.com/HKUDS/CLI-Anything';
 
@@ -34,6 +34,7 @@ const EXAMPLE_TOOLS = [
 ];
 
 export default function ToolLibrary() {
+  const activeServer = useStore((s) => s.activeServer);
   const {
     installedTools,
     toolsMeta,
@@ -58,8 +59,28 @@ export default function ToolLibrary() {
   }, []);
 
   useEffect(() => {
-    fetchTools(false);
-  }, [fetchTools]);
+    let cancelled = false;
+    fetch(apiUrl('/api/tools/installed'))
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        useStore.setState({
+          installedTools: data.tools || [],
+          toolsMeta: { python3: data.python3 ?? null, refreshedAt: data.refreshedAt ?? null },
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          useStore.setState({
+            installedTools: [],
+            toolsMeta: { python3: null, refreshedAt: null },
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeServer]);
 
   useEffect(() => {
     if (outRef.current) {

@@ -28,6 +28,9 @@ export function sessionIdToTmuxName(sessionId) {
   return `omc-session-${String(sessionId).replace(/^omc-/, '')}`;
 }
 
+let wsReconnectTimer = null;
+let installRefreshTimer = null;
+
 export const useStore = create((set, get) => ({
   // Multi-server: full base URL e.g. http://192.168.1.10:3200 (no trailing slash)
   activeServer: typeof window !== 'undefined' ? getOrigin() : '',
@@ -154,6 +157,15 @@ export const useStore = create((set, get) => ({
 
   // Connect to the WebSocket server
   connect: () => {
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
+    if (installRefreshTimer) {
+      clearTimeout(installRefreshTimer);
+      installRefreshTimer = null;
+    }
+
     const prev = get().ws;
     if (prev) {
       prev.onclose = null;
@@ -242,7 +254,11 @@ export const useStore = create((set, get) => ({
 
               // If install is complete, refresh server status
               if (msg.status === 'complete') {
-                setTimeout(() => get().fetchStatus(), 1000);
+                if (installRefreshTimer) clearTimeout(installRefreshTimer);
+                installRefreshTimer = setTimeout(() => {
+                  installRefreshTimer = null;
+                  get().fetchStatus();
+                }, 1000);
               }
             }
             break;
@@ -260,7 +276,10 @@ export const useStore = create((set, get) => ({
     ws.onclose = () => {
       set({ connected: false, ws: null });
       console.log('[WS] Disconnected — reconnecting in 3s');
-      setTimeout(() => get().connect(), 3000);
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        get().connect();
+      }, 3000);
     };
 
     ws.onerror = () => {

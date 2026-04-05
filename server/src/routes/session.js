@@ -37,7 +37,8 @@ export async function sessionRoutes(fastify) {
           sessionId: err.sessionId ?? null,
         });
       }
-      return reply.code(409).send({ error: err.message || 'start failed' });
+      req.log.error(err);
+      return reply.code(500).send({ error: err.message || 'start failed' });
     }
   });
 
@@ -78,19 +79,26 @@ export async function sessionRoutes(fastify) {
           sessionId: err.sessionId ?? null,
         });
       }
-      return reply.code(409).send({ error: err.message || 'start failed' });
+      req.log.error(err);
+      return reply.code(500).send({ error: err.message || 'start failed' });
     }
   });
 
   /** Stop the current session */
   fastify.post('/stop', async (req, reply) => {
     const result = cliCommander.stopSession();
+    if (result.status === 'no_session') {
+      return reply.code(404).send({ error: 'no_session', message: 'No active session' });
+    }
     return result;
   });
 
   /** Force kill: tmux kill-session + SIGKILL child + reset state + WS + SQLite status killed */
   fastify.post('/kill', async (req, reply) => {
     const result = cliCommander.killSession();
+    if (result.status === 'no_session') {
+      return reply.code(404).send({ error: 'no_session', message: 'No active session' });
+    }
     return result;
   });
 
@@ -122,6 +130,11 @@ export async function sessionRoutes(fastify) {
     }
     const tmuxSession =
       typeof body.tmuxSession === 'string' && body.tmuxSession.trim() ? body.tmuxSession.trim() : undefined;
+    const hasTmuxTarget = Boolean(tmuxSession || cliCommander.tmuxSessionName);
+    const hasStdin = Boolean(cliCommander.activeProcess?.stdin?.writable);
+    if (!hasTmuxTarget && !hasStdin) {
+      return reply.code(404).send({ error: 'no_session', message: 'No active session or input target' });
+    }
     cliCommander.sendInput(body.text == null ? '' : String(body.text), { tmuxSession });
     return { status: 'sent' };
   });

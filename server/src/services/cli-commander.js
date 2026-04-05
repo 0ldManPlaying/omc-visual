@@ -1,14 +1,17 @@
-import { spawn, execFileSync } from 'child_process';
+import { spawn, execFileSync, execSync } from 'child_process';
 import { existsSync } from 'fs';
 import { homedir } from 'os';
 import { join, normalize } from 'path';
 
-const CLAWHIP_FALLBACK = '/home/admincaku/.cargo/bin/clawhip';
-
 function resolveClawhipBin() {
   const cargo = join(homedir(), '.cargo', 'bin', 'clawhip');
   if (existsSync(cargo)) return cargo;
-  if (existsSync(CLAWHIP_FALLBACK)) return CLAWHIP_FALLBACK;
+  try {
+    const which = execSync('which clawhip 2>/dev/null', { encoding: 'utf-8' }).trim();
+    if (which && existsSync(which)) return which;
+  } catch {
+    /* not on PATH */
+  }
   return null;
 }
 
@@ -61,6 +64,7 @@ export class CLICommander {
     this.session = null;
     this.tmuxSessionName = null;
     this.tmuxPollTimer = null;
+    this._pollStartTimeout = null;
     this.lastPaneText = '';
     this.completionFinalizeTimer = null;
   }
@@ -446,7 +450,7 @@ export class CLICommander {
     });
 
     // Defer polling until tmux session exists (launcher often exits within ~1s).
-    setTimeout(() => this.startTmuxPolling(sessionId), 2000);
+    this.scheduleDeferredTmuxPolling(sessionId);
   }
 
   finalizeCompletedSession(sessionId) {
@@ -539,7 +543,22 @@ export class CLICommander {
       this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
     });
 
-    setTimeout(() => this.startTmuxPolling(sessionId), 2000);
+    this.scheduleDeferredTmuxPolling(sessionId);
+  }
+
+  scheduleDeferredTmuxPolling(sessionId) {
+    if (this._pollStartTimeout) {
+      clearTimeout(this._pollStartTimeout);
+      this._pollStartTimeout = null;
+    }
+    const capturedSessionId = sessionId;
+    const capturedTmuxName = this.tmuxSessionName;
+    this._pollStartTimeout = setTimeout(() => {
+      this._pollStartTimeout = null;
+      if (this.tmuxSessionName !== capturedTmuxName) return;
+      if (this.session?.id !== capturedSessionId) return;
+      this.startTmuxPolling(capturedSessionId);
+    }, 2000);
   }
 
   startDirectClaude({ cwd, sessionId, fullPrompt, mode, model }) {
@@ -653,6 +672,10 @@ export class CLICommander {
   }
 
   clearTmuxPoll() {
+    if (this._pollStartTimeout) {
+      clearTimeout(this._pollStartTimeout);
+      this._pollStartTimeout = null;
+    }
     if (this.tmuxPollTimer) {
       const name = this.tmuxSessionName;
       clearInterval(this.tmuxPollTimer);

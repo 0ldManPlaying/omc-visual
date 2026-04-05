@@ -55,7 +55,26 @@ export default function SessionHistory() {
   };
 
   useEffect(() => {
-    fetchSessions();
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      try {
+        const params = new URLSearchParams({ limit, offset: page * limit });
+        if (modeFilter) params.set('mode', modeFilter);
+        const res = await fetch(apiUrl(`/api/history/sessions?${params}`));
+        const data = await res.json();
+        if (cancelled) return;
+        setSessions(data.sessions || []);
+        setTotal(data.total || 0);
+      } catch {
+        if (!cancelled) setSessions([]);
+      }
+      if (!cancelled) setLoading(false);
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
   }, [page, modeFilter, activeServer]);
 
   const handleExpand = async (id) => {

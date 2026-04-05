@@ -76,6 +76,14 @@ export class SessionStore {
     `);
   }
 
+  /** Delete terminal output chunks older than `daysToKeep` (default 30). */
+  pruneOldOutput(daysToKeep = 30) {
+    const cutoffMs = Date.now() - daysToKeep * 24 * 60 * 60 * 1000;
+    const cutoff = new Date(cutoffMs).toISOString();
+    const result = this.db.prepare('DELETE FROM session_output WHERE timestamp < ?').run(cutoff);
+    return { deleted: result.changes ?? 0 };
+  }
+
   saveSession(session) {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO sessions (id, mode, prompt, started_at, status, cwd, tmux_session)

@@ -31,14 +31,12 @@ function normalizeBase(u) {
 export default function App() {
   const {
     connected,
-    fetchStatus,
     serverStatus,
     activeServer,
     servers,
     serverReachable,
     setActiveServer,
     fetchServers,
-    refreshServerReachability,
   } = useStore();
 
   const [serverMenuOpen, setServerMenuOpen] = useState(false);

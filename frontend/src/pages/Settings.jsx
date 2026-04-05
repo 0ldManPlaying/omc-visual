@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Settings as SettingsIcon,
   Save,
@@ -38,30 +38,50 @@ export default function Settings() {
   const [newServerUrl, setNewServerUrl] = useState('');
   const [serverBusy, setServerBusy] = useState(false);
   const [testingName, setTestingName] = useState(null);
+  const messageTimerRef = useRef(null);
+
+  const fetchSettings = useCallback(
+    async (opts = {}) => {
+      const isCancelled = typeof opts.isCancelled === 'function' ? opts.isCancelled : () => false;
+      setLoading(true);
+      try {
+        const res = await fetch(apiUrl('/api/settings'));
+        const data = await res.json();
+        if (isCancelled()) return;
+        setSettings(data);
+        if (data.clawhip?.content) {
+          setClawhipConfig(data.clawhip.content);
+        }
+      } catch {
+        if (!isCancelled()) setSettings(null);
+      }
+      if (!isCancelled()) setLoading(false);
+    },
+    [activeServer]
+  );
 
   useEffect(() => {
-    fetchSettings();
-    fetchServers();
-  }, [activeServer]);
+    return () => {
+      if (messageTimerRef.current) clearTimeout(messageTimerRef.current);
+    };
+  }, []);
 
-  const fetchSettings = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(apiUrl('/api/settings'));
-      const data = await res.json();
-      setSettings(data);
-      if (data.clawhip?.content) {
-        setClawhipConfig(data.clawhip.content);
-      }
-    } catch {
-      setSettings(null);
-    }
-    setLoading(false);
-  };
+  useEffect(() => {
+    let cancelled = false;
+    fetchServers();
+    void fetchSettings({ isCancelled: () => cancelled });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeServer, fetchSettings]);
 
   const showMessage = (text, type = 'success') => {
+    if (messageTimerRef.current) clearTimeout(messageTimerRef.current);
     setMessage({ text, type });
-    setTimeout(() => setMessage(null), 4000);
+    messageTimerRef.current = setTimeout(() => {
+      setMessage(null);
+      messageTimerRef.current = null;
+    }, 4000);
   };
 
   const handleCleanupOrphans = async () => {

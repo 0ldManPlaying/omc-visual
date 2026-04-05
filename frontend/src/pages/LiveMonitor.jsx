@@ -15,6 +15,7 @@ import {
   Download,
 } from 'lucide-react';
 import { AnsiUp } from 'ansi_up';
+import DOMPurify from 'dompurify';
 import { useStore } from '../stores/useStore';
 
 function stripAnsi(text) {
@@ -45,6 +46,8 @@ export default function LiveMonitor() {
   const [copiedChunkKey, setCopiedChunkKey] = useState(null);
   const outputRef = useRef(null);
   const copyAllTimeoutRef = useRef(null);
+  const copyChunkTimeoutRef = useRef(null);
+  const inputSentFlashRef = useRef(null);
 
   const ansiUp = useMemo(() => {
     const a = new AnsiUp();
@@ -71,6 +74,7 @@ export default function LiveMonitor() {
   useEffect(() => {
     return () => {
       if (copyAllTimeoutRef.current) clearTimeout(copyAllTimeoutRef.current);
+      if (copyChunkTimeoutRef.current) clearTimeout(copyChunkTimeoutRef.current);
       if (inputSentFlashRef.current) clearTimeout(inputSentFlashRef.current);
     };
   }, []);
@@ -91,8 +95,10 @@ export default function LiveMonitor() {
     try {
       await navigator.clipboard.writeText(plain);
       setCopiedChunkKey(key);
-      setTimeout(() => {
+      if (copyChunkTimeoutRef.current) clearTimeout(copyChunkTimeoutRef.current);
+      copyChunkTimeoutRef.current = setTimeout(() => {
         setCopiedChunkKey((k) => (k === key ? null : k));
+        copyChunkTimeoutRef.current = null;
       }, 2000);
     } catch {
       /* ignore */
@@ -110,8 +116,6 @@ export default function LiveMonitor() {
     a.click();
     URL.revokeObjectURL(url);
   };
-
-  const inputSentFlashRef = useRef(null);
 
   const flashInputSent = () => {
     setInputSentOk(true);
@@ -357,7 +361,7 @@ function OutputChunk({ chunkKey, line, ansiUp, plainText, copiedChunkKey, onCopy
     );
   }
   const raw = line.text ?? '';
-  const html = ansiUp.ansi_to_html(raw);
+  const html = DOMPurify.sanitize(ansiUp.ansi_to_html(raw));
   const dim = line.type === 'stderr';
   return (
     <div className={`group relative pr-10 ${dim ? 'opacity-80' : ''}`}>

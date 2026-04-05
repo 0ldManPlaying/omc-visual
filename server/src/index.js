@@ -26,11 +26,32 @@ const __dirname = dirname(__filename);
 const PORT = process.env.OMC_VISUAL_PORT || 3200;
 const HOST = process.env.OMC_VISUAL_HOST || '0.0.0.0';
 
+function isAllowedCorsOrigin(origin) {
+  if (!origin) return true;
+  const allowedPrefixes = [
+    'http://localhost',
+    'http://127.0.0.1',
+    'https://localhost',
+    'https://127.0.0.1',
+    'http://192.168.',
+    'https://192.168.',
+  ];
+  return allowedPrefixes.some((p) => origin.startsWith(p));
+}
+
 async function start() {
   const app = Fastify({ logger: true });
 
-  // Plugins
-  await app.register(fastifyCors, { origin: true });
+  // Plugins — restrict browser origins (localhost + RFC1918 192.168.*)
+  await app.register(fastifyCors, {
+    origin: (origin, cb) => {
+      if (isAllowedCorsOrigin(origin)) {
+        cb(null, true);
+      } else {
+        cb(new Error('Not allowed by CORS'), false);
+      }
+    },
+  });
   await app.register(fastifyWebsocket);
 
   // Serve frontend build if it exists
@@ -58,6 +79,15 @@ async function start() {
     toolManager.refresh();
   } catch (e) {
     console.warn('[ToolManager] Initial scan failed:', e.message);
+  }
+
+  try {
+    const pruned = sessionStore.pruneOldOutput(30);
+    if (pruned.deleted > 0) {
+      console.log(`[SessionStore] Pruned ${pruned.deleted} session_output row(s) older than 30 days`);
+    }
+  } catch (e) {
+    console.warn('[SessionStore] Output prune failed:', e.message);
   }
 
   // Decorate app with services so routes can access them
@@ -146,6 +176,19 @@ async function start() {
 
     // Start watching OMC state
     stateWatcher.start();
+
+    const shutdown = async (signal) => {
+      app.log.info({ signal }, 'Shutting down');
+      try {
+        stateWatcher.stop();
+        await app.close();
+      } catch (e) {
+        app.log.error(e);
+      }
+      process.exit(0);
+    };
+    process.once('SIGINT', () => shutdown('SIGINT'));
+    process.once('SIGTERM', () => shutdown('SIGTERM'));
   } catch (err) {
     app.log.error(err);
     process.exit(1);

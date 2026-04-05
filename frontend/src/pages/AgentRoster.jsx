@@ -44,16 +44,24 @@ export default function AgentRoster() {
   const [filterModel, setFilterModel] = useState(null);
 
   useEffect(() => {
+    let cancelled = false;
     fetch(apiUrl('/api/status/agents'))
       .then((r) => r.json())
       .then((data) => {
-        if (data.agents?.length > 0) setAgents(data.agents);
+        if (cancelled || !data.agents?.length) return;
+        setAgents(data.agents);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setAgents(FALLBACK_AGENTS);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [activeServer]);
 
   const filtered = agents.filter((a) => {
-    if (search && !a.name.includes(search.toLowerCase()) && !a.description?.toLowerCase().includes(search.toLowerCase())) return false;
+    const q = search.toLowerCase();
+    if (search && !a.name.toLowerCase().includes(q) && !a.description?.toLowerCase().includes(q)) return false;
     if (filterModel && !a.model?.includes(filterModel)) return false;
     return true;
   });
