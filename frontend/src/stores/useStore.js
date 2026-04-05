@@ -22,6 +22,12 @@ export function apiUrl(path) {
   return `${base}${p}`;
 }
 
+/** Derive tmux session name from OMC session id (omc-123 → omc-session-123) */
+export function sessionIdToTmuxName(sessionId) {
+  if (!sessionId || !String(sessionId).startsWith('omc-')) return null;
+  return `omc-session-${String(sessionId).replace(/^omc-/, '')}`;
+}
+
 export const useStore = create((set, get) => ({
   // Multi-server: full base URL e.g. http://192.168.1.10:3200 (no trailing slash)
   activeServer: typeof window !== 'undefined' ? getOrigin() : '',
@@ -34,6 +40,8 @@ export const useStore = create((set, get) => ({
 
   // Session state
   session: null,
+  /** Last known tmux target for send-keys; kept after session clears so input still works */
+  lastTmuxSession: null,
   outputLines: [],
 
   // Worker events (from Clawhip)
@@ -63,7 +71,13 @@ export const useStore = create((set, get) => ({
 
   setActiveServer: (url) => {
     const normalized = String(url || '').replace(/\/$/, '') || getOrigin();
-    set({ activeServer: normalized, outputLines: [], workerEvents: [], stateEvents: [] });
+    set({
+      activeServer: normalized,
+      outputLines: [],
+      workerEvents: [],
+      stateEvents: [],
+      lastTmuxSession: null,
+    });
   },
 
   fetchServers: async () => {
@@ -164,9 +178,16 @@ export const useStore = create((set, get) => ({
         const state = get();
 
         switch (msg.channel) {
-          case 'output':
-            set({ outputLines: [...state.outputLines.slice(-500), msg] });
+          case 'output': {
+            const nextLines = [...state.outputLines.slice(-500), msg];
+            let nextTmux = state.lastTmuxSession;
+            if (msg.sessionId) {
+              const t = sessionIdToTmuxName(msg.sessionId);
+              if (t) nextTmux = t;
+            }
+            set({ outputLines: nextLines, lastTmuxSession: nextTmux });
             break;
+          }
 
           case 'workers':
             set({ workerEvents: [...state.workerEvents.slice(-100), msg] });
@@ -182,11 +203,19 @@ export const useStore = create((set, get) => ({
               break;
             }
             if (msg.type === 'completed' && msg.session != null) {
-              set({ session: msg.session });
+              const t =
+                msg.session.tmuxSession ||
+                sessionIdToTmuxName(msg.session.id) ||
+                state.lastTmuxSession;
+              set({ session: msg.session, lastTmuxSession: t || state.lastTmuxSession });
               break;
             }
             if (msg.session != null) {
-              set({ session: msg.session });
+              const t =
+                msg.session.tmuxSession ||
+                sessionIdToTmuxName(msg.session.id) ||
+                state.lastTmuxSession;
+              set({ session: msg.session, lastTmuxSession: t || state.lastTmuxSession });
             }
             break;
 
@@ -242,11 +271,18 @@ export const useStore = create((set, get) => ({
   // Send input to the running session (REST first; empty string sends Enter only in tmux)
   sendInput: async (text) => {
     const payload = text === undefined || text === null ? '' : String(text);
+    const { session, lastTmuxSession } = get();
+    const tmuxSession =
+      session?.tmuxSession ||
+      (session?.id ? sessionIdToTmuxName(session.id) : null) ||
+      lastTmuxSession;
+    const body = { text: payload };
+    if (tmuxSession) body.tmuxSession = tmuxSession;
     try {
       const res = await fetch(apiUrl('/api/session/input'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: payload }),
+        body: JSON.stringify(body),
       });
       if (res.ok) return true;
     } catch {
@@ -255,7 +291,7 @@ export const useStore = create((set, get) => ({
     const { ws } = get();
     if (ws && ws.readyState === 1) {
       try {
-        ws.send(JSON.stringify({ type: 'input', text: payload }));
+        ws.send(JSON.stringify({ type: 'input', text: payload, ...(tmuxSession ? { tmuxSession } : {}) }));
         return true;
       } catch {
         return false;
@@ -311,8 +347,10 @@ export const useStore = create((set, get) => ({
   stopSession: async () => {
     try {
       await fetch(apiUrl('/api/session/stop'), { method: 'POST' });
+      set({ lastTmuxSession: null });
       await get().fetchStatus();
     } catch {
+      set({ lastTmuxSession: null });
       await get().fetchStatus();
     }
   },
@@ -320,8 +358,10 @@ export const useStore = create((set, get) => ({
   killSession: async () => {
     try {
       await fetch(apiUrl('/api/session/kill'), { method: 'POST' });
+      set({ lastTmuxSession: null });
       await get().fetchStatus();
     } catch {
+      set({ lastTmuxSession: null });
       await get().fetchStatus();
     }
   },
@@ -330,6 +370,7 @@ export const useStore = create((set, get) => ({
     try {
       const res = await fetch(apiUrl('/api/session/cleanup'), { method: 'POST' });
       const data = await res.json().catch(() => ({}));
+      set({ lastTmuxSession: null });
       await get().fetchStatus();
       return { ok: res.ok, ...data };
     } catch (e) {
@@ -343,7 +384,14 @@ export const useStore = create((set, get) => ({
     try {
       const res = await fetch(apiUrl('/api/status'));
       const data = await res.json();
-      set({ serverStatus: data, session: data.session });
+      const s = data.session;
+      const tFromApi =
+        s?.tmuxSession || (s?.id ? sessionIdToTmuxName(s.id) : null);
+      set({
+        serverStatus: data,
+        session: data.session,
+        ...(tFromApi ? { lastTmuxSession: tFromApi } : {}),
+      });
     } catch {
       set({ serverStatus: null });
     }

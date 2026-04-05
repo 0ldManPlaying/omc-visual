@@ -77,7 +77,11 @@ async function start() {
           const msg = JSON.parse(raw.toString());
           // Handle client messages (e.g., user input to session)
           if (msg.type === 'input' && Object.prototype.hasOwnProperty.call(msg, 'text')) {
-            cliCommander.sendInput(msg.text == null ? '' : String(msg.text));
+            const tmuxSession =
+              typeof msg.tmuxSession === 'string' && msg.tmuxSession.trim()
+                ? msg.tmuxSession.trim()
+                : undefined;
+            cliCommander.sendInput(msg.text == null ? '' : String(msg.text), { tmuxSession });
           }
         } catch (e) {
           // ignore malformed messages

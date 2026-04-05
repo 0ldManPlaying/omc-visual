@@ -120,7 +120,9 @@ export async function sessionRoutes(fastify) {
         .code(400)
         .send({ error: 'text is required (use empty string to send Enter only)' });
     }
-    cliCommander.sendInput(body.text == null ? '' : String(body.text));
+    const tmuxSession =
+      typeof body.tmuxSession === 'string' && body.tmuxSession.trim() ? body.tmuxSession.trim() : undefined;
+    cliCommander.sendInput(body.text == null ? '' : String(body.text), { tmuxSession });
     return { status: 'sent' };
   });
 }

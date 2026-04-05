@@ -266,38 +266,36 @@ export default function LiveMonitor() {
             )}
           </div>
 
-          {session && (
-            <div className="border-t border-[#1a2e28] p-3 flex flex-col gap-2 bg-[#0d1816]">
-              <div className="flex gap-2 items-center">
-                <input
-                  type="text"
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key !== 'Enter') return;
-                    e.preventDefault();
-                    void handleSend();
-                  }}
-                  placeholder="Send input to session… (empty + Enter = trust prompt)"
-                  className="flex-1 bg-[#0a1612] border border-[#1a3530] rounded-lg px-3 py-2 text-[14px] text-[#c8d6d0] placeholder-[#2a4e40] focus:outline-none focus:border-emerald-500/30"
-                />
-                <button
-                  type="button"
-                  onClick={() => void handleSend()}
-                  className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-2 text-white transition-colors shrink-0"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </div>
-              <div
-                className={`text-[12px] min-h-[1rem] transition-opacity duration-200 ${
-                  inputSentOk ? 'text-emerald-400/90 opacity-100' : 'text-transparent opacity-0'
-                }`}
+          <div className="border-t border-[#1a2e28] p-3 flex flex-col gap-2 bg-[#0d1816]">
+            <div className="flex gap-2 items-center">
+              <input
+                type="text"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  void handleSend();
+                }}
+                placeholder="Send input to session… (empty + Enter = trust prompt)"
+                className="flex-1 bg-[#0a1612] border border-[#1a3530] rounded-lg px-3 py-2 text-[14px] text-[#c8d6d0] placeholder-[#2a4e40] focus:outline-none focus:border-emerald-500/30"
+              />
+              <button
+                type="button"
+                onClick={() => void handleSend()}
+                className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-2 text-white transition-colors shrink-0"
               >
-                Sent ✓
-              </div>
+                <Send className="w-4 h-4" />
+              </button>
             </div>
-          )}
+            <div
+              className={`text-[12px] min-h-[1rem] transition-opacity duration-200 ${
+                inputSentOk ? 'text-emerald-400/90 opacity-100' : 'text-transparent opacity-0'
+              }`}
+            >
+              Sent ✓
+            </div>
+          </div>
         </div>
 
         <div className="w-[280px] flex flex-col rounded-xl border border-[#1a2e28] bg-[#0a1210] overflow-hidden shrink-0">
