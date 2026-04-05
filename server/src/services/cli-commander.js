@@ -24,22 +24,31 @@ function expandUserPath(p) {
   return normalize(t);
 }
 
+/** Print mode (`-p`): one-shot run, process exits when done. Team stays interactive (no `-p`). */
+function useClaudePrintMode(mode) {
+  return mode !== 'team';
+}
+
 /**
- * Shell one-liner for tmux/bash: `claude` + optional --dangerously-skip-permissions (autopilot only).
+ * Shell one-liner for tmux/bash: `claude` + optional `-p`, `--dangerously-skip-permissions` (autopilot).
  * Matches oh-my-claudecode's claude contract (see bridge runtime-cli buildLaunchArgs).
  */
 function buildClaudeBashInvocation(mode, fullPrompt, { model } = {}) {
   const quoted = JSON.stringify(fullPrompt);
   const modelPart = model ? ` --model ${JSON.stringify(model)}` : '';
+  const printPart = useClaudePrintMode(mode) ? ' -p' : '';
   if (mode === 'autopilot') {
-    return `claude --dangerously-skip-permissions${modelPart} ${quoted}`;
+    return `claude${printPart} --dangerously-skip-permissions${modelPart} ${quoted}`;
   }
-  return `claude${modelPart} ${quoted}`;
+  return `claude${printPart}${modelPart} ${quoted}`;
 }
 
-/** argv for direct spawn (no shell) — skip permissions only in autopilot */
+/** argv for direct spawn (no shell) — `-p` when not team; skip permissions only in autopilot */
 function buildClaudeSpawnArgs(mode, fullPrompt, { model } = {}) {
   const args = [];
+  if (useClaudePrintMode(mode)) {
+    args.push('-p');
+  }
   if (model) {
     args.push('--model', model);
   }
@@ -54,7 +63,7 @@ function buildClaudeSpawnArgs(mode, fullPrompt, { model } = {}) {
 /**
  * CLI Commander — spawns OMC sessions via Clawhip tmux wrapper when available,
  * else direct `claude`. Tmux pane output is polled to WebSocket `output` channel.
- * Auto-completion: tmux capture-pane failure (pane gone), bash prompt after Claude Code exits, or Stop/Kill.
+ * Session end: tmux capture-pane failure (pane/session gone after `claude -p` exits), or Stop/Kill.
  */
 export class CLICommander {
   constructor(wsHub, sessionStore = null) {
@@ -508,46 +517,6 @@ export class CLICommander {
     this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
   }
 
-  /**
-   * End session immediately when tmux shows bash again (Claude Code exited) — no 5s delay.
-   * @param {string} reason — e.g. 'bash_prompt' for WebSocket clients
-   */
-  completeSessionAfterFinishMarker(sessionId, reason = 'bash_prompt') {
-    if (!this.session || this.session.id !== sessionId) return;
-    this.clearCompletionFinalizeTimer();
-    this.clearTmuxPoll();
-    const tmuxName = this.tmuxSessionName;
-    if (tmuxName) {
-      try {
-        execFileSync('tmux', ['kill-session', '-t', tmuxName], { stdio: 'ignore' });
-      } catch {
-        /* ignore */
-      }
-    }
-    this.tmuxSessionName = null;
-    this._lastPaneText = '';
-    this.activeProcess = null;
-    const snap = {
-      id: this.session.id,
-      mode: this.session.mode,
-      prompt: this.session.prompt,
-      startedAt: this.session.startedAt,
-      status: 'completed',
-      tmuxSession: null,
-    };
-    const id = this.session.id;
-    if (this.sessionStore) {
-      this.sessionStore.endSession(id, 0);
-    }
-    this.session = null;
-    this.wsHub.broadcastChannel('session', {
-      type: 'completed',
-      session: snap,
-      reason,
-    });
-    this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
-  }
-
   scheduleSessionCompletion(sessionId, reason) {
     if (!this.session || this.session.id !== sessionId) return;
     if (this.session.completionUiStatus === 'completed') return;
@@ -800,7 +769,6 @@ export class CLICommander {
     this._lastTeamPaneSig = null;
     // Fresh baseline so we never skip the first emit because of a stale buffer from a prior poll/session.
     this._lastPaneText = '';
-    this._pollStartedAt = Date.now();
 
     const tmuxSession = this.tmuxSessionName;
     const leadPaneTarget = `${tmuxSession}:0.0`;
@@ -828,29 +796,6 @@ export class CLICommander {
           'changed:',
           text !== this._lastPaneText
         );
-
-        const lines = text.split('\n').filter((l) => l.trim());
-        const lastNonEmpty = lines[lines.length - 1] || '';
-        const isBashPrompt = /\w+@\w+:.+\$\s*$/.test(lastNonEmpty);
-        if (isBashPrompt && Date.now() - this._pollStartedAt > 15000) {
-          console.log('[tmux-poll] Bash prompt detected, Claude Code has exited:', lastNonEmpty);
-          if (text !== this._lastPaneText) {
-            this._lastPaneText = text;
-            this.emitOutput(sessionId, {
-              type: 'stdout',
-              sessionId,
-              text,
-              replacePane: true,
-            });
-          }
-          this.emitOutput(sessionId, {
-            type: 'stdout',
-            sessionId,
-            text: '\n✅ Task completed\n',
-          });
-          this.completeSessionAfterFinishMarker(sessionId, 'bash_prompt');
-          return;
-        }
 
         if (text === this._lastPaneText) {
           return;
