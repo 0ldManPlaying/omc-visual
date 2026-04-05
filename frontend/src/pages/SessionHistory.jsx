@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
+import { AnsiUp } from 'ansi_up';
 import {
   History, Clock, Trash2, ChevronDown, ChevronRight, Activity,
-  AlertTriangle, CheckCircle, Zap, Filter, Rocket,
+  AlertTriangle, CheckCircle, Zap, Filter, Rocket, Play, X,
 } from 'lucide-react';
+import { apiUrl, useStore } from '../stores/useStore';
 
 const MODE_COLORS = {
   autopilot: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20' },
@@ -23,6 +25,7 @@ const SEVERITY_STYLES = {
 };
 
 export default function SessionHistory() {
+  const activeServer = useStore((s) => s.activeServer);
   const [sessions, setSessions] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -30,6 +33,10 @@ export default function SessionHistory() {
   const [expandedId, setExpandedId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [replayFor, setReplayFor] = useState(null);
+  const [replayChunks, setReplayChunks] = useState([]);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const replayScrollRef = useRef(null);
   const limit = 20;
 
   const fetchSessions = async () => {
@@ -37,7 +44,7 @@ export default function SessionHistory() {
     try {
       const params = new URLSearchParams({ limit, offset: page * limit });
       if (modeFilter) params.set('mode', modeFilter);
-      const res = await fetch(`/api/history/sessions?${params}`);
+      const res = await fetch(apiUrl(`/api/history/sessions?${params}`));
       const data = await res.json();
       setSessions(data.sessions || []);
       setTotal(data.total || 0);
@@ -49,7 +56,7 @@ export default function SessionHistory() {
 
   useEffect(() => {
     fetchSessions();
-  }, [page, modeFilter]);
+  }, [page, modeFilter, activeServer]);
 
   const handleExpand = async (id) => {
     if (expandedId === id) {
@@ -59,7 +66,7 @@ export default function SessionHistory() {
     }
     setExpandedId(id);
     try {
-      const res = await fetch(`/api/history/sessions/${id}`);
+      const res = await fetch(apiUrl(`/api/history/sessions/${id}`));
       const data = await res.json();
       setDetail(data);
     } catch {
@@ -68,12 +75,31 @@ export default function SessionHistory() {
   };
 
   const handleDelete = async (id) => {
-    await fetch(`/api/history/sessions/${id}`, { method: 'DELETE' });
+    await fetch(apiUrl(`/api/history/sessions/${id}`), { method: 'DELETE' });
     fetchSessions();
     if (expandedId === id) {
       setExpandedId(null);
       setDetail(null);
     }
+  };
+
+  const openReplay = async (session) => {
+    setReplayFor(session);
+    setReplayLoading(true);
+    setReplayChunks([]);
+    try {
+      const res = await fetch(apiUrl(`/api/sessions/${session.id}/output`));
+      const data = await res.json().catch(() => ({}));
+      setReplayChunks(Array.isArray(data.chunks) ? data.chunks : []);
+    } catch {
+      setReplayChunks([]);
+    }
+    setReplayLoading(false);
+  };
+
+  const closeReplay = () => {
+    setReplayFor(null);
+    setReplayChunks([]);
   };
 
   const totalPages = Math.ceil(total / limit);
@@ -155,6 +181,17 @@ export default function SessionHistory() {
                     </span>
                     <p className="flex-1 truncate text-[14px] text-[#a0b8b0]">{session.prompt}</p>
                     <div className="flex items-center gap-3 shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void openReplay(session);
+                        }}
+                        className="flex items-center gap-1 rounded-md border border-[#1a3530] bg-[#0a1612] px-2 py-1 text-[12px] text-sky-400/90 hover:bg-[#12221e] hover:text-sky-300 transition-colors"
+                      >
+                        <Play className="w-3 h-3" />
+                        Replay
+                      </button>
                       {session.duration_ms != null && (
                         <span className="tabular-nums text-[13px] text-[#5a7a70]">
                           {formatDuration(session.duration_ms)}
@@ -220,7 +257,15 @@ export default function SessionHistory() {
                     )}
 
                     {/* Actions */}
-                    <div className="flex items-center gap-2 mt-4 pt-3 border-t border-[#1a2e28]">
+                    <div className="flex items-center gap-3 mt-4 pt-3 border-t border-[#1a2e28]">
+                      <button
+                        type="button"
+                        onClick={() => void openReplay(session)}
+                        className="flex items-center gap-1.5 text-[13px] text-sky-400/80 transition-colors hover:text-sky-300"
+                      >
+                        <Play className="w-3 h-3" />
+                        Replay output
+                      </button>
                       <button
                         type="button"
                         onClick={() => handleDelete(session.id)}
@@ -260,6 +305,124 @@ export default function SessionHistory() {
           </button>
         </div>
       )}
+
+      {replayFor && (
+        <ReplayModal
+          session={replayFor}
+          chunks={replayChunks}
+          loading={replayLoading}
+          onClose={closeReplay}
+          scrollRef={replayScrollRef}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReplayModal({ session, chunks, loading, onClose, scrollRef }) {
+  const ansiUp = useMemo(() => {
+    const a = new AnsiUp();
+    a.use_classes = false;
+    return a;
+  }, []);
+
+  useEffect(() => {
+    if (!loading && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [loading, chunks, scrollRef]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="replay-title"
+      onClick={onClose}
+    >
+      <div
+        className="flex h-[min(88vh,820px)] min-h-0 w-full max-w-5xl flex-col rounded-xl border border-[#1a2e28] bg-[#0a1210] shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-[#1a2e28] bg-[#0d1816] px-4 py-3">
+          <div className="min-w-0">
+            <h2 id="replay-title" className="text-[16px] font-semibold text-white truncate">
+              Session replay
+            </h2>
+            <p className="text-[13px] text-[#5a7a70] font-mono truncate">{session.id}</p>
+            <p className="text-[13px] text-[#8aaa9f] line-clamp-2 mt-0.5">{session.prompt}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-[#1a3530] p-2 text-[#8aaa9f] hover:bg-[#12221e] hover:text-white shrink-0"
+            aria-label="Close"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="px-4 py-2 border-b border-[#1a2e28] bg-[#0f1e1a] text-[13px] text-[#5a7a70]">
+          {loading
+            ? 'Loading saved output…'
+            : chunks.length === 0
+              ? 'No output chunks stored for this session yet (only sessions started after this update capture pane output).'
+              : `${chunks.length} chunk${chunks.length === 1 ? '' : 's'} · scrollable log`}
+        </div>
+        <div
+          ref={scrollRef}
+          className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-[1.7] bg-[#0a0f0d]"
+        >
+          {loading ? (
+            <div className="text-[#3a5a50] text-center py-12">Loading…</div>
+          ) : (
+            chunks.map((c, i) => (
+              <ReplayLine key={`${c.timestamp}-${i}`} chunk={c} ansiUp={ansiUp} />
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReplayLine({ chunk, ansiUp }) {
+  const ts = chunk.timestamp
+    ? new Date(chunk.timestamp).toLocaleTimeString(undefined, { hour12: false })
+    : '';
+  const text = chunk.text ?? '';
+  const isExit = chunk.type === 'error' && /^\[exit\]/i.test(text);
+
+  let body;
+  if (isExit) {
+    body = (
+      <div className="text-amber-400/90 whitespace-pre-wrap break-words border-t border-[#1a2e28] pt-2 mt-2 first:mt-0 first:pt-0 first:border-0">
+        {text}
+      </div>
+    );
+  } else if (chunk.type === 'error') {
+    body = (
+      <div className="text-red-400 whitespace-pre-wrap break-words">{text}</div>
+    );
+  } else if (chunk.type === 'stderr') {
+    body = (
+      <div
+        className="whitespace-pre-wrap break-words text-red-300/80 opacity-90"
+        dangerouslySetInnerHTML={{ __html: ansiUp.ansi_to_html(text) }}
+      />
+    );
+  } else {
+    body = (
+      <div
+        className="whitespace-pre-wrap break-words text-[#c8e0d4]"
+        dangerouslySetInnerHTML={{ __html: ansiUp.ansi_to_html(text) }}
+      />
+    );
+  }
+
+  return (
+    <div className="flex gap-3 py-1 border-b border-[#12221e]/80 last:border-0">
+      <div className="w-[88px] shrink-0 text-[11px] text-[#2a5a48] tabular-nums pt-0.5 select-none">{ts}</div>
+      <div className="min-w-0 flex-1">{body}</div>
     </div>
   );
 }

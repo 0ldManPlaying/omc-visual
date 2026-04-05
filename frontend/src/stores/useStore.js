@@ -1,6 +1,33 @@
 import { create } from 'zustand';
 
+function getOrigin() {
+  if (typeof window === 'undefined') return '';
+  return `${window.location.protocol}//${window.location.host}`;
+}
+
+function wsUrlFromActiveServer(activeServer) {
+  const base = (activeServer || '').replace(/\/$/, '');
+  if (!base) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}/ws`;
+  }
+  return `${base.replace(/^http/, 'ws')}/ws`;
+}
+
+/** Prefix API paths with the selected OMC Visual server base URL */
+export function apiUrl(path) {
+  const base = (useStore.getState().activeServer || '').replace(/\/$/, '');
+  const p = path.startsWith('/') ? path : `/${path}`;
+  if (!base) return p;
+  return `${base}${p}`;
+}
+
 export const useStore = create((set, get) => ({
+  // Multi-server: full base URL e.g. http://192.168.1.10:3200 (no trailing slash)
+  activeServer: typeof window !== 'undefined' ? getOrigin() : '',
+  servers: [],
+  serverReachable: {},
+
   // Connection state
   connected: false,
   serverStatus: null,
@@ -34,15 +61,101 @@ export const useStore = create((set, get) => ({
   // WebSocket instance
   ws: null,
 
+  setActiveServer: (url) => {
+    const normalized = String(url || '').replace(/\/$/, '') || getOrigin();
+    set({ activeServer: normalized, outputLines: [], workerEvents: [], stateEvents: [] });
+  },
+
+  fetchServers: async () => {
+    try {
+      const res = await fetch(apiUrl('/api/servers'));
+      const data = await res.json();
+      set({ servers: data.servers || [] });
+    } catch {
+      set({ servers: [] });
+    }
+  },
+
+  addServerEntry: async (name, url) => {
+    try {
+      const res = await fetch(apiUrl('/api/servers'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        set({ servers: data.servers || [] });
+        return { ok: true };
+      }
+      return { ok: false, error: data.error || 'failed' };
+    } catch (e) {
+      return { ok: false, error: e.message || 'request failed' };
+    }
+  },
+
+  removeServerEntry: async (name) => {
+    try {
+      const res = await fetch(apiUrl(`/api/servers/${encodeURIComponent(name)}`), {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        set({ servers: data.servers || [] });
+        return { ok: true };
+      }
+      return { ok: false, error: data.error || 'failed' };
+    } catch (e) {
+      return { ok: false, error: e.message || 'request failed' };
+    }
+  },
+
+  testServerConnection: async (name) => {
+    try {
+      const res = await fetch(apiUrl(`/api/servers/${encodeURIComponent(name)}/status`));
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, ...data };
+    } catch (e) {
+      return { ok: false, online: false, error: e.message || 'request failed' };
+    }
+  },
+
+  refreshServerReachability: async () => {
+    const { servers } = get();
+    if (!servers?.length) return;
+    const next = { ...get().serverReachable };
+    await Promise.all(
+      servers.map(async (s) => {
+        try {
+          const res = await fetch(apiUrl(`/api/servers/${encodeURIComponent(s.name)}/status`));
+          const data = await res.json().catch(() => ({}));
+          next[s.name] = data.online === true;
+        } catch {
+          next[s.name] = false;
+        }
+      })
+    );
+    set({ serverReachable: next });
+  },
+
   // Connect to the WebSocket server
   connect: () => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const prev = get().ws;
+    if (prev) {
+      prev.onclose = null;
+      try {
+        prev.close();
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const wsUrl = wsUrlFromActiveServer(get().activeServer);
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
       set({ connected: true, ws });
-      console.log('[WS] Connected');
+      console.log('[WS] Connected', wsUrl);
     };
 
     ws.onmessage = (event) => {
@@ -66,6 +179,10 @@ export const useStore = create((set, get) => ({
           case 'session':
             if (msg.type === 'ended' || msg.type === 'stopped' || msg.type === 'killed') {
               set({ session: null });
+              break;
+            }
+            if (msg.type === 'completed' && msg.session != null) {
+              set({ session: msg.session });
               break;
             }
             if (msg.session != null) {
@@ -106,7 +223,7 @@ export const useStore = create((set, get) => ({
               set({ connected: true });
             }
         }
-      } catch (e) {
+      } catch {
         // ignore
       }
     };
@@ -122,12 +239,29 @@ export const useStore = create((set, get) => ({
     };
   },
 
-  // Send input to the running session
-  sendInput: (text) => {
+  // Send input to the running session (REST first; empty string sends Enter only in tmux)
+  sendInput: async (text) => {
+    const payload = text === undefined || text === null ? '' : String(text);
+    try {
+      const res = await fetch(apiUrl('/api/session/input'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: payload }),
+      });
+      if (res.ok) return true;
+    } catch {
+      /* try WebSocket fallback */
+    }
     const { ws } = get();
     if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'input', text }));
+      try {
+        ws.send(JSON.stringify({ type: 'input', text: payload }));
+        return true;
+      } catch {
+        return false;
+      }
     }
+    return false;
   },
 
   // Clear output
@@ -138,7 +272,7 @@ export const useStore = create((set, get) => ({
   fetchTools: async (refresh = false) => {
     try {
       const q = refresh ? '?refresh=1' : '';
-      const res = await fetch(`/api/tools/installed${q}`);
+      const res = await fetch(apiUrl(`/api/tools/installed${q}`));
       const data = await res.json();
       set({
         installedTools: data.tools || [],
@@ -153,7 +287,7 @@ export const useStore = create((set, get) => ({
 
   executeTool: async (binary, args = [], jsonMode = false) => {
     try {
-      const res = await fetch('/api/tools/execute', {
+      const res = await fetch(apiUrl('/api/tools/execute'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ binary, args, jsonMode }),
@@ -167,7 +301,7 @@ export const useStore = create((set, get) => ({
 
   stopToolExecution: async () => {
     try {
-      const res = await fetch('/api/tools/stop', { method: 'POST' });
+      const res = await fetch(apiUrl('/api/tools/stop'), { method: 'POST' });
       return await res.json();
     } catch {
       return { status: 'error' };
@@ -176,7 +310,7 @@ export const useStore = create((set, get) => ({
 
   stopSession: async () => {
     try {
-      await fetch('/api/session/stop', { method: 'POST' });
+      await fetch(apiUrl('/api/session/stop'), { method: 'POST' });
       await get().fetchStatus();
     } catch {
       await get().fetchStatus();
@@ -185,7 +319,7 @@ export const useStore = create((set, get) => ({
 
   killSession: async () => {
     try {
-      await fetch('/api/session/kill', { method: 'POST' });
+      await fetch(apiUrl('/api/session/kill'), { method: 'POST' });
       await get().fetchStatus();
     } catch {
       await get().fetchStatus();
@@ -194,7 +328,7 @@ export const useStore = create((set, get) => ({
 
   cleanupSessions: async () => {
     try {
-      const res = await fetch('/api/session/cleanup', { method: 'POST' });
+      const res = await fetch(apiUrl('/api/session/cleanup'), { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       await get().fetchStatus();
       return { ok: res.ok, ...data };
@@ -207,7 +341,7 @@ export const useStore = create((set, get) => ({
   // Fetch server status via REST
   fetchStatus: async () => {
     try {
-      const res = await fetch('/api/status');
+      const res = await fetch(apiUrl('/api/status'));
       const data = await res.json();
       set({ serverStatus: data, session: data.session });
     } catch {
@@ -227,7 +361,7 @@ export const useStore = create((set, get) => ({
     });
 
     try {
-      const res = await fetch('/api/clawhip/install', { method: 'POST' });
+      const res = await fetch(apiUrl('/api/clawhip/install'), { method: 'POST' });
       const data = await res.json();
 
       if (!res.ok) {
@@ -256,7 +390,7 @@ export const useStore = create((set, get) => ({
   // Start Clawhip daemon
   startClawhipDaemon: async () => {
     try {
-      const res = await fetch('/api/clawhip/start', { method: 'POST' });
+      const res = await fetch(apiUrl('/api/clawhip/start'), { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
         setTimeout(() => get().fetchStatus(), 500);
@@ -270,7 +404,7 @@ export const useStore = create((set, get) => ({
   // Stop Clawhip daemon
   stopClawhipDaemon: async () => {
     try {
-      const res = await fetch('/api/clawhip/stop', { method: 'POST' });
+      const res = await fetch(apiUrl('/api/clawhip/stop'), { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
         setTimeout(() => get().fetchStatus(), 500);
@@ -284,7 +418,7 @@ export const useStore = create((set, get) => ({
   // Scaffold Clawhip config
   scaffoldClawhipConfig: async () => {
     try {
-      const res = await fetch('/api/clawhip/scaffold-config', { method: 'POST' });
+      const res = await fetch(apiUrl('/api/clawhip/scaffold-config'), { method: 'POST' });
       return await res.json();
     } catch {
       return { error: 'Could not connect to server' };

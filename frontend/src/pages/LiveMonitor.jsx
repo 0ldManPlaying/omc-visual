@@ -36,8 +36,10 @@ function outputLinesPlaintext(lines) {
 }
 
 export default function LiveMonitor() {
-  const { session, outputLines, workerEvents, stateEvents, sendInput, fetchStatus, killSession } = useStore();
+  const { session, outputLines, workerEvents, stateEvents, sendInput, fetchStatus, killSession, stopSession } =
+    useStore();
   const [inputText, setInputText] = useState('');
+  const [inputSentOk, setInputSentOk] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [copyAllDone, setCopyAllDone] = useState(false);
   const [copiedChunkKey, setCopiedChunkKey] = useState(null);
@@ -69,6 +71,7 @@ export default function LiveMonitor() {
   useEffect(() => {
     return () => {
       if (copyAllTimeoutRef.current) clearTimeout(copyAllTimeoutRef.current);
+      if (inputSentFlashRef.current) clearTimeout(inputSentFlashRef.current);
     };
   }, []);
 
@@ -108,15 +111,26 @@ export default function LiveMonitor() {
     URL.revokeObjectURL(url);
   };
 
-  const handleSend = () => {
-    if (inputText.trim()) {
-      sendInput(inputText.trim());
-      setInputText('');
-    }
+  const inputSentFlashRef = useRef(null);
+
+  const flashInputSent = () => {
+    setInputSentOk(true);
+    if (inputSentFlashRef.current) clearTimeout(inputSentFlashRef.current);
+    inputSentFlashRef.current = setTimeout(() => {
+      setInputSentOk(false);
+      inputSentFlashRef.current = null;
+    }, 1200);
+  };
+
+  const handleSend = async () => {
+    const trimmed = inputText.trim();
+    const ok = await sendInput(trimmed);
+    if (trimmed) setInputText('');
+    if (ok) flashInputSent();
   };
 
   const handleStop = async () => {
-    await fetch('/api/session/stop', { method: 'POST' });
+    await stopSession();
     await fetchStatus();
   };
 
@@ -159,10 +173,11 @@ export default function LiveMonitor() {
             <button
               type="button"
               onClick={handleKill}
+              title="Kill active session (tmux kill-session, reset state)"
               className="flex items-center gap-1.5 rounded-lg border border-red-500/40 px-3 py-1.5 text-[14px] text-red-400 hover:bg-red-500/10 transition-colors"
             >
               <XCircle className="w-3.5 h-3.5" />
-              Kill
+              Kill session
             </button>
           </div>
         )}
@@ -252,22 +267,35 @@ export default function LiveMonitor() {
           </div>
 
           {session && (
-            <div className="border-t border-[#1a2e28] p-3 flex gap-2 bg-[#0d1816]">
-              <input
-                type="text"
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="Send input to session…"
-                className="flex-1 bg-[#0a1612] border border-[#1a3530] rounded-lg px-3 py-2 text-[14px] text-[#c8d6d0] placeholder-[#2a4e40] focus:outline-none focus:border-emerald-500/30"
-              />
-              <button
-                type="button"
-                onClick={handleSend}
-                className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-2 text-white transition-colors"
+            <div className="border-t border-[#1a2e28] p-3 flex flex-col gap-2 bg-[#0d1816]">
+              <div className="flex gap-2 items-center">
+                <input
+                  type="text"
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return;
+                    e.preventDefault();
+                    void handleSend();
+                  }}
+                  placeholder="Send input to session… (empty + Enter = trust prompt)"
+                  className="flex-1 bg-[#0a1612] border border-[#1a3530] rounded-lg px-3 py-2 text-[14px] text-[#c8d6d0] placeholder-[#2a4e40] focus:outline-none focus:border-emerald-500/30"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleSend()}
+                  className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-2 text-white transition-colors shrink-0"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
+              <div
+                className={`text-[12px] min-h-[1rem] transition-opacity duration-200 ${
+                  inputSentOk ? 'text-emerald-400/90 opacity-100' : 'text-transparent opacity-0'
+                }`}
               >
-                <Send className="w-4 h-4" />
-              </button>
+                Sent ✓
+              </div>
             </div>
           )}
         </div>

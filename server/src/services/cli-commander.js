@@ -52,6 +52,19 @@ function buildClaudeSpawnArgs(mode, fullPrompt, { model } = {}) {
  * CLI Commander — spawns OMC sessions via Clawhip tmux wrapper when available,
  * else direct `claude`. Tmux pane output is polled to WebSocket `output` channel.
  */
+/** Positive pane phrases / keywords for “Claude finished” (not error/failed). */
+const COMPLETION_SUBSTRINGS = [
+  'has completed',
+  'task complete',
+  'all done',
+  'successfully',
+];
+
+function paneLooksCompleteByKeywords(paneLower) {
+  if (/\b(complete|completed|success)\b/i.test(paneLower)) return true;
+  return COMPLETION_SUBSTRINGS.some((s) => paneLower.includes(s));
+}
+
 export class CLICommander {
   constructor(wsHub, sessionStore = null) {
     this.wsHub = wsHub;
@@ -61,6 +74,68 @@ export class CLICommander {
     this.tmuxSessionName = null;
     this.tmuxPollTimer = null;
     this.lastPaneText = '';
+    this.completionFinalizeTimer = null;
+    /** Consecutive polls where last line looks like a shell prompt (stability). */
+    this._shellPromptStreak = 0;
+    /** Consecutive polls where Claude Code idle (❯/> + OMC HUD, or completed + prompt). */
+    this._claudeIdleStreak = 0;
+    this._pollStartedAt = 0;
+  }
+
+  /** Persist terminal output for replay, then broadcast to WebSocket clients */
+  emitOutput(sessionId, payload) {
+    if (this.sessionStore && sessionId) {
+      const { type, text, message, code } = payload;
+      if (type === 'stderr' && text != null && String(text)) {
+        this.sessionStore.saveOutputChunk(sessionId, String(text), 'stderr');
+      } else if (type === 'error') {
+        const t = message != null ? String(message) : '';
+        if (t) this.sessionStore.saveOutputChunk(sessionId, t, 'error');
+      } else if (type === 'exit') {
+        this.sessionStore.saveOutputChunk(sessionId, `[exit] ${String(code)}`, 'error');
+      } else if (text != null && String(text)) {
+        this.sessionStore.saveOutputChunk(sessionId, String(text), 'output');
+      }
+    }
+    this.wsHub.broadcastChannel('output', payload);
+  }
+
+  /** All tmux sessions (for Settings → view active sessions) */
+  listTmuxSessions() {
+    try {
+      const out = execFileSync(
+        'tmux',
+        ['list-sessions', '-F', '#{session_name}\t#{session_created}\t#{session_attached}'],
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }
+      );
+      return out
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const parts = line.split('\t');
+          const name = parts[0] || line;
+          const createdRaw = parts[1] || '';
+          const attachedRaw = parts[2] || '0';
+          let created = '';
+          if (createdRaw && /^\d+$/.test(createdRaw)) {
+            created = new Date(Number(createdRaw) * 1000).toISOString();
+          } else if (createdRaw) {
+            created = createdRaw;
+          }
+          const attached = attachedRaw === '1' || attachedRaw === 'true';
+          return { name, created, attached };
+        });
+    } catch {
+      return [];
+    }
+  }
+
+  clearCompletionFinalizeTimer() {
+    if (this.completionFinalizeTimer) {
+      clearTimeout(this.completionFinalizeTimer);
+      this.completionFinalizeTimer = null;
+    }
   }
 
   /** Log orphan tmux sessions; reconnect polling if one omc-session-* is still alive */
@@ -116,11 +191,19 @@ export class CLICommander {
       startedAt,
       cwd,
       tmuxSession,
+      completionUiStatus: null,
     };
     this.tmuxSessionName = tmuxSession;
     this.activeProcess = null;
     this.lastPaneText = '';
 
+    this.session.keywords =
+      typeof row?.keywords === 'string' && row.keywords.trim()
+        ? row.keywords.trim()
+        : 'error,complete,failed,success';
+    this._pollStartedAt = Date.now();
+    this._shellPromptStreak = 0;
+    this._claudeIdleStreak = 0;
     this.startTmuxPolling(sessionId);
     this.wsHub.broadcastChannel('session', {
       type: 'started',
@@ -143,6 +226,7 @@ export class CLICommander {
 
     const touchesCurrent = this.tmuxSessionName && names.includes(this.tmuxSessionName);
     if (touchesCurrent) {
+      this.clearCompletionFinalizeTimer();
       this.clearTmuxPoll();
       if (this.activeProcess) {
         const proc = this.activeProcess;
@@ -171,11 +255,20 @@ export class CLICommander {
       }
     }
 
-    return { status: 'cleaned', killed: names.length };
+    return { cleaned: names.length, sessions: names };
   }
 
   getSession() {
     if (!this.session) return null;
+    if (this.session.completionUiStatus === 'completed') {
+      return {
+        id: this.session.id,
+        mode: this.session.mode,
+        prompt: this.session.prompt,
+        startedAt: this.session.startedAt,
+        status: 'completed',
+      };
+    }
     const running = this.activeProcess != null || this.tmuxSessionName != null;
     return {
       id: this.session.id,
@@ -206,9 +299,31 @@ export class CLICommander {
     }
   }
 
-  async startSession({ mode, prompt, workdir, files = [], options = {}, userPrompt }) {
-    if (this.activeProcess || this.tmuxSessionName) {
-      throw new Error('A session is already running. Stop it first.');
+  isSessionOccupied() {
+    return (
+      this.tmuxSessionName != null ||
+      this.activeProcess != null ||
+      (this.session != null && this.session.completionUiStatus !== 'completed')
+    );
+  }
+
+  async startSession({ mode, prompt, workdir, files = [], options = {}, userPrompt, force = false }) {
+    if (this.isSessionOccupied()) {
+      if (force) {
+        this.clearCompletionFinalizeTimer();
+        this.killSession();
+        await new Promise((r) => setTimeout(r, 1000));
+      } else {
+        const err = new Error('SESSION_ACTIVE');
+        err.code = 'session_active';
+        err.sessionId = this.session?.id ?? null;
+        throw err;
+      }
+    }
+
+    if (this.session?.completionUiStatus === 'completed') {
+      this.clearCompletionFinalizeTimer();
+      this.session = null;
     }
 
     const sessionId = `omc-${Date.now()}`;
@@ -250,6 +365,8 @@ export class CLICommander {
       startedAt: new Date().toISOString(),
       cwd,
       tmuxSession,
+      keywords,
+      completionUiStatus: null,
     };
 
     this.sessionStore?.saveSession(this.session);
@@ -322,7 +439,7 @@ export class CLICommander {
 
     this.activeProcess.on('close', (code) => {
       this.activeProcess = null;
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(sessionId, {
         type: 'stderr',
         sessionId,
         text: `\n[clawhip] launcher exited (code ${code}). Pane output continues below; tmux session: ${tmuxSession}\n`,
@@ -331,7 +448,7 @@ export class CLICommander {
 
     this.activeProcess.on('error', (err) => {
       const id = this.session?.id;
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(sessionId, {
         type: 'error',
         sessionId,
         message: err.message,
@@ -345,6 +462,113 @@ export class CLICommander {
     });
 
     setTimeout(() => this.startTmuxPolling(sessionId), 900);
+  }
+
+  finalizeCompletedSession(sessionId) {
+    if (!this.session || this.session.id !== sessionId) {
+      this.clearCompletionFinalizeTimer();
+      return;
+    }
+    this.clearCompletionFinalizeTimer();
+    this.clearTmuxPoll();
+    const tmuxName = this.tmuxSessionName;
+    if (tmuxName) {
+      try {
+        execFileSync('tmux', ['kill-session', '-t', tmuxName], { stdio: 'ignore' });
+      } catch {
+        /* ignore */
+      }
+    }
+    this.tmuxSessionName = null;
+    this.lastPaneText = '';
+    this.activeProcess = null;
+    const id = this.session.id;
+    if (this.sessionStore) {
+      this.sessionStore.endSession(id, 0);
+    }
+    this.session = null;
+    this._shellPromptStreak = 0;
+    this._claudeIdleStreak = 0;
+    this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
+  }
+
+  scheduleSessionCompletion(sessionId, reason) {
+    if (!this.session || this.session.id !== sessionId) return;
+    if (this.session.completionUiStatus === 'completed') return;
+    if (this.completionFinalizeTimer) return;
+
+    this.session.completionUiStatus = 'completed';
+    this.wsHub.broadcastChannel('session', {
+      type: 'completed',
+      session: this.getSession(),
+      reason,
+    });
+
+    this.completionFinalizeTimer = setTimeout(() => {
+      this.completionFinalizeTimer = null;
+      this.finalizeCompletedSession(sessionId);
+    }, 5000);
+  }
+
+  evaluateTmuxPaneForCompletion(text, sessionId) {
+    if (!this.session || this.session.id !== sessionId) return;
+    if (this.session.completionUiStatus === 'completed') return;
+    if (!this.tmuxSessionName) return;
+
+    const minAgeMs = 6000;
+    if (Date.now() - this._pollStartedAt < minAgeMs) return;
+
+    const stripAnsi = (s) =>
+      s
+        .replace(/\x1b\[[\d;?]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07]*\x07/g, '');
+    const rawLines = text.split('\n').map((l) => stripAnsi(l));
+    const last10 = rawLines.slice(-10);
+    const last5 = rawLines.slice(-5);
+
+    const hasClaudePromptLine = last10.some((l) => /^\s*[❯>]\s*$/.test(l.trim()));
+    const hasOmcHud = last5.some((l) => l.includes('[OMC#'));
+    const isClaudeIdle = hasClaudePromptLine && hasOmcHud;
+
+    const tailSlice = text.slice(-4000);
+    const tailLower = tailSlice.toLowerCase();
+    const hasCompletedWord = /\bcompleted\b/i.test(tailSlice);
+    const claudeIdleSignal = isClaudeIdle || (hasCompletedWord && hasClaudePromptLine);
+
+    if (claudeIdleSignal) {
+      this._claudeIdleStreak += 1;
+    } else {
+      this._claudeIdleStreak = 0;
+    }
+
+    if (this._claudeIdleStreak >= 2) {
+      this.scheduleSessionCompletion(sessionId, 'claude_idle');
+      return;
+    }
+
+    const nonEmpty = rawLines.map((l) => l.trimEnd()).filter((l) => l.trim());
+    const lastLine = nonEmpty[nonEmpty.length - 1] || '';
+    const trimmedLast = lastLine.trim();
+    const isShellPrompt =
+      trimmedLast.length > 0 &&
+      trimmedLast.length < 400 &&
+      /[$#]\s*$/.test(trimmedLast) &&
+      !/claude/i.test(trimmedLast);
+
+    if (isShellPrompt) {
+      this._shellPromptStreak += 1;
+    } else {
+      this._shellPromptStreak = 0;
+    }
+
+    if (this._shellPromptStreak >= 2) {
+      this.scheduleSessionCompletion(sessionId, 'shell_prompt');
+      return;
+    }
+
+    if (paneLooksCompleteByKeywords(tailLower)) {
+      this.scheduleSessionCompletion(sessionId, 'keyword');
+    }
   }
 
   /** Tmux + claude without Clawhip keyword/stale monitoring (pane capture only) */
@@ -371,7 +595,7 @@ export class CLICommander {
 
     this.activeProcess.on('close', (code) => {
       this.activeProcess = null;
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(sessionId, {
         type: 'stderr',
         sessionId,
         text: `\n[tmux] launcher exited (code ${code}). Session: ${tmuxSession}\n`,
@@ -380,7 +604,7 @@ export class CLICommander {
 
     this.activeProcess.on('error', (err) => {
       const id = this.session?.id;
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(sessionId, {
         type: 'error',
         sessionId,
         message: err.message,
@@ -415,7 +639,7 @@ export class CLICommander {
       if (this.session?.id && this.sessionStore) {
         this.sessionStore.endSession(this.session.id, code ?? 0);
       }
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(sessionId, {
         type: 'exit',
         sessionId,
         code,
@@ -427,7 +651,7 @@ export class CLICommander {
 
     this.activeProcess.on('error', (err) => {
       const id = this.session?.id;
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(sessionId, {
         type: 'error',
         sessionId,
         message: err.message,
@@ -442,14 +666,14 @@ export class CLICommander {
   attachProcessStreams(sessionId) {
     if (!this.activeProcess) return;
     this.activeProcess.stdout?.on('data', (data) => {
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(sessionId, {
         type: 'stdout',
         sessionId,
         text: data.toString(),
       });
     });
     this.activeProcess.stderr?.on('data', (data) => {
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(sessionId, {
         type: 'stderr',
         sessionId,
         text: data.toString(),
@@ -460,6 +684,9 @@ export class CLICommander {
   startTmuxPolling(sessionId) {
     if (!this.tmuxSessionName) return;
     this.clearTmuxPoll();
+    this._pollStartedAt = Date.now();
+    this._shellPromptStreak = 0;
+    this._claudeIdleStreak = 0;
 
     this.tmuxPollTimer = setInterval(() => {
       if (!this.tmuxSessionName) {
@@ -472,7 +699,10 @@ export class CLICommander {
           ['capture-pane', '-t', this.tmuxSessionName, '-p', '-S', '-400'],
           { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 }
         );
-        if (text === this.lastPaneText) return;
+        if (text === this.lastPaneText) {
+          this.evaluateTmuxPaneForCompletion(text, sessionId);
+          return;
+        }
         let delta = '';
         if (text.startsWith(this.lastPaneText)) {
           delta = text.slice(this.lastPaneText.length);
@@ -481,14 +711,17 @@ export class CLICommander {
         }
         this.lastPaneText = text;
         if (delta) {
-          this.wsHub.broadcastChannel('output', {
+          this.emitOutput(sessionId, {
             type: 'stdout',
             sessionId,
             text: delta,
           });
         }
+        this.evaluateTmuxPaneForCompletion(text, sessionId);
       } catch {
-        // Session ended or tmux unavailable
+        if (this.session?.id === sessionId && this.tmuxSessionName) {
+          this.scheduleSessionCompletion(sessionId, 'pane_gone');
+        }
       }
     }, 700);
   }
@@ -501,17 +734,27 @@ export class CLICommander {
   }
 
   sendInput(text) {
+    if (text === undefined || text === null) {
+      return;
+    }
+    const payload = String(text);
     if (this.tmuxSessionName) {
       try {
-        execFileSync('tmux', ['send-keys', '-t', this.tmuxSessionName, '-l', text], { stdio: 'ignore' });
-        execFileSync('tmux', ['send-keys', '-t', this.tmuxSessionName, 'Enter'], { stdio: 'ignore' });
+        if (payload === '') {
+          execFileSync('tmux', ['send-keys', '-t', this.tmuxSessionName, 'Enter'], { stdio: 'ignore' });
+        } else {
+          execFileSync('tmux', ['send-keys', '-t', this.tmuxSessionName, '-l', payload], {
+            stdio: 'ignore',
+          });
+          execFileSync('tmux', ['send-keys', '-t', this.tmuxSessionName, 'Enter'], { stdio: 'ignore' });
+        }
       } catch {
         // ignore
       }
       return;
     }
     if (this.activeProcess?.stdin?.writable) {
-      this.activeProcess.stdin.write(`${text}\n`);
+      this.activeProcess.stdin.write(payload === '' ? '\n' : `${payload}\n`);
     }
   }
 
@@ -522,6 +765,7 @@ export class CLICommander {
 
     const prevId = this.session?.id;
 
+    this.clearCompletionFinalizeTimer();
     this.clearTmuxPoll();
 
     if (this.tmuxSessionName) {
@@ -563,7 +807,7 @@ export class CLICommander {
     });
 
     if (prevId) {
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(prevId, {
         type: 'exit',
         sessionId: prevId,
         code: 'stopped',
@@ -581,6 +825,7 @@ export class CLICommander {
     const prevId = this.session?.id;
     const tmuxName = this.tmuxSessionName;
 
+    this.clearCompletionFinalizeTimer();
     this.clearTmuxPoll();
 
     if (tmuxName) {
@@ -615,7 +860,7 @@ export class CLICommander {
     });
 
     if (prevId) {
-      this.wsHub.broadcastChannel('output', {
+      this.emitOutput(prevId, {
         type: 'exit',
         sessionId: prevId,
         code: 'killed',

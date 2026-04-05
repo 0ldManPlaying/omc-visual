@@ -12,6 +12,8 @@ import { clawhipRoutes } from './routes/clawhip.js';
 import { historyRoutes } from './routes/history.js';
 import { settingsRoutes } from './routes/settings.js';
 import { toolsRoutes } from './routes/tools.js';
+import { serversRoutes } from './routes/servers.js';
+import { loadServersConfig } from './services/servers-registry.js';
 import { WebSocketHub } from './services/websocket-hub.js';
 import { ToolManager } from './services/tool-manager.js';
 import { StateWatcher } from './services/state-watcher.js';
@@ -44,6 +46,11 @@ async function start() {
   const wsHub = new WebSocketHub();
   const sessionStore = new SessionStore();
   const cliCommander = new CLICommander(wsHub, sessionStore);
+  loadServersConfig();
+  const orphanCleanup = cliCommander.cleanupOmcTmuxSessions();
+  console.log(
+    `[Startup] Cleaned ${orphanCleanup.cleaned ?? orphanCleanup.killed ?? 0} orphan omc tmux session(s)`
+  );
   cliCommander.initializeOnServerStart();
   const stateWatcher = new StateWatcher(wsHub, sessionStore, () => cliCommander.getSession()?.id);
   const toolManager = new ToolManager();
@@ -69,8 +76,8 @@ async function start() {
         try {
           const msg = JSON.parse(raw.toString());
           // Handle client messages (e.g., user input to session)
-          if (msg.type === 'input' && msg.text) {
-            cliCommander.sendInput(msg.text);
+          if (msg.type === 'input' && Object.prototype.hasOwnProperty.call(msg, 'text')) {
+            cliCommander.sendInput(msg.text == null ? '' : String(msg.text));
           }
         } catch (e) {
           // ignore malformed messages
@@ -90,6 +97,20 @@ async function start() {
   await app.register(historyRoutes, { prefix: '/api/history' });
   await app.register(settingsRoutes, { prefix: '/api/settings' });
   await app.register(toolsRoutes, { prefix: '/api/tools' });
+  await app.register(serversRoutes, { prefix: '/api/servers' });
+
+  /** Session terminal output replay (canonical path per UI spec) */
+  app.get('/api/sessions/:id/output', async (req, reply) => {
+    const session = sessionStore.getSession(req.params.id);
+    if (!session) return reply.code(404).send({ error: 'Session not found' });
+    const rows = sessionStore.getSessionOutput(req.params.id);
+    const chunks = rows.map((r) => ({
+      text: r.text,
+      type: r.type,
+      timestamp: r.timestamp,
+    }));
+    return { sessionId: req.params.id, chunks };
+  });
 
   // SPA fallback for frontend routing
   app.setNotFoundHandler((req, reply) => {

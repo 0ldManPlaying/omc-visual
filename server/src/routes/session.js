@@ -13,6 +13,7 @@ export async function sessionRoutes(fastify) {
         workdir,
         files,
         options,
+        force,
       } = req.body || {};
 
       if (!prompt || !String(prompt).trim()) {
@@ -25,10 +26,18 @@ export async function sessionRoutes(fastify) {
         workdir,
         files: Array.isArray(files) ? files : [],
         options: options && typeof options === 'object' ? options : {},
+        force: Boolean(force),
       });
       return { status: 'started', session };
     } catch (err) {
-      return reply.code(409).send({ error: err.message });
+      if (err.code === 'session_active') {
+        return reply.code(409).send({
+          error: 'session_active',
+          message: 'Er draait al een sessie',
+          sessionId: err.sessionId ?? null,
+        });
+      }
+      return reply.code(409).send({ error: err.message || 'start failed' });
     }
   });
 
@@ -42,6 +51,7 @@ export async function sessionRoutes(fastify) {
         workdir,
         files,
         options,
+        force,
       } = req.body || {};
 
       if (!prompt || !String(prompt).trim()) {
@@ -57,10 +67,18 @@ export async function sessionRoutes(fastify) {
         workdir,
         files: Array.isArray(files) ? files : [],
         options: options && typeof options === 'object' ? options : {},
+        force: Boolean(force),
       });
       return { status: 'started', session };
     } catch (err) {
-      return reply.code(409).send({ error: err.message });
+      if (err.code === 'session_active') {
+        return reply.code(409).send({
+          error: 'session_active',
+          message: 'Er draait al een sessie',
+          sessionId: err.sessionId ?? null,
+        });
+      }
+      return reply.code(409).send({ error: err.message || 'start failed' });
     }
   });
 
@@ -82,19 +100,27 @@ export async function sessionRoutes(fastify) {
     return result;
   });
 
+  /** List all tmux sessions (name, created, attached) */
+  fastify.get('/tmux-list', async () => {
+    const sessions = cliCommander.listTmuxSessions();
+    return { sessions };
+  });
+
   /** Get current session status */
   fastify.get('/current', async (req, reply) => {
     const session = cliCommander.getSession();
     return { session };
   });
 
-  /** Send input to the running session */
+  /** Send input to the running session (empty string = Enter only, for trust prompts) */
   fastify.post('/input', async (req, reply) => {
-    const { text } = req.body || {};
-    if (!text) {
-      return reply.code(400).send({ error: 'text is required' });
+    const body = req.body || {};
+    if (!('text' in body)) {
+      return reply
+        .code(400)
+        .send({ error: 'text is required (use empty string to send Enter only)' });
     }
-    cliCommander.sendInput(text);
+    cliCommander.sendInput(body.text == null ? '' : String(body.text));
     return { status: 'sent' };
   });
 }

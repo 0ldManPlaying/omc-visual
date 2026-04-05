@@ -2,12 +2,12 @@ import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { BarChart3, Coins, Cpu, TrendingUp, Clock, Zap, Activity, Rocket } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { useStore } from '../stores/useStore';
+import { useStore, apiUrl } from '../stores/useStore';
 
 const CHART_COLORS = ['#10b981', '#3b82f6', '#a855f7', '#f59e0b', '#06b6d4', '#22c55e'];
 
 export default function HudDashboard() {
-  const { hudData } = useStore();
+  const { hudData, activeServer } = useStore();
   const [aggregate, setAggregate] = useState(null);
   const [sessionHistory, setSessionHistory] = useState([]);
 
@@ -16,8 +16,8 @@ export default function HudDashboard() {
     (async () => {
       try {
         const [mRes, sRes] = await Promise.all([
-          fetch('/api/history/metrics'),
-          fetch('/api/history/sessions?limit=50'),
+          fetch(apiUrl('/api/history/metrics')),
+          fetch(apiUrl('/api/history/sessions?limit=50')),
         ]);
         const metrics = await mRes.json().catch(() => ({}));
         const sessBody = await sRes.json().catch(() => ({}));
@@ -35,7 +35,7 @@ export default function HudDashboard() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeServer]);
 
   // Derive chart data from sessions
   const durationData = useMemo(() => {

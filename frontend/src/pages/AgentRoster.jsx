@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { apiUrl, useStore } from '../stores/useStore';
 import { Users, Search, Cpu, Shield, Code, FileText, Microscope, Palette, Bug } from 'lucide-react';
 
 const MODEL_STYLES = {
@@ -37,18 +38,19 @@ const FALLBACK_AGENTS = [
 ];
 
 export default function AgentRoster() {
+  const activeServer = useStore((s) => s.activeServer);
   const [agents, setAgents] = useState(FALLBACK_AGENTS);
   const [search, setSearch] = useState('');
   const [filterModel, setFilterModel] = useState(null);
 
   useEffect(() => {
-    fetch('/api/status/agents')
+    fetch(apiUrl('/api/status/agents'))
       .then((r) => r.json())
       .then((data) => {
         if (data.agents?.length > 0) setAgents(data.agents);
       })
       .catch(() => {});
-  }, []);
+  }, [activeServer]);
 
   const filtered = agents.filter((a) => {
     if (search && !a.name.includes(search.toLowerCase()) && !a.description?.toLowerCase().includes(search.toLowerCase())) return false;

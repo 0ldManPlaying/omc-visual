@@ -61,6 +61,18 @@ export class SessionStore {
       CREATE INDEX IF NOT EXISTS idx_events_timestamp ON session_events(timestamp);
       CREATE INDEX IF NOT EXISTS idx_metrics_session ON session_metrics(session_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+
+      CREATE TABLE IF NOT EXISTS session_output (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        chunk_text TEXT NOT NULL,
+        chunk_type TEXT NOT NULL DEFAULT 'output',
+        timestamp TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_session_output_session ON session_output(session_id);
+      CREATE INDEX IF NOT EXISTS idx_session_output_ts ON session_output(timestamp);
     `);
   }
 
@@ -115,6 +127,28 @@ export class SessionStore {
       JSON.stringify(event),
       event.timestamp || new Date().toISOString()
     );
+  }
+
+  saveOutputChunk(sessionId, chunkText, chunkType = 'output') {
+    if (!sessionId || chunkText == null) return;
+    const text = String(chunkText);
+    if (!text) return;
+    const type =
+      chunkType === 'stderr' || chunkType === 'error' || chunkType === 'output'
+        ? chunkType
+        : 'output';
+    this.db.prepare(`
+      INSERT INTO session_output (session_id, chunk_text, chunk_type, timestamp)
+      VALUES (?, ?, ?, ?)
+    `).run(sessionId, text, type, new Date().toISOString());
+  }
+
+  getSessionOutput(sessionId) {
+    return this.db
+      .prepare(
+        'SELECT chunk_text as text, chunk_type as type, timestamp FROM session_output WHERE session_id = ? ORDER BY timestamp ASC, id ASC'
+      )
+      .all(sessionId);
   }
 
   saveMetrics(sessionId, metrics) {
@@ -212,6 +246,7 @@ export class SessionStore {
   }
 
   deleteSession(sessionId) {
+    this.db.prepare('DELETE FROM session_output WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM session_events WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM session_metrics WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
