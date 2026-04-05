@@ -114,6 +114,30 @@ export async function sessionRoutes(fastify) {
     return { sessions };
   });
 
+  /** Tmux panes in window 0 of the active session (native team splits) */
+  fastify.get('/team-panes', async () => {
+    const panes = cliCommander.getTeamPanes();
+    const enriched = panes.map((p) => ({
+      ...p,
+      role: p.index === 0 ? 'lead' : `worker-${p.index}`,
+    }));
+    return {
+      teamActive: panes.length > 1,
+      workers: Math.max(0, panes.length - 1),
+      panes: enriched,
+    };
+  });
+
+  /** Raw pane text for a specific pane index (window 0) */
+  fastify.get('/team-panes/:index/output', async (req, reply) => {
+    const idx = Number(req.params.index);
+    if (!Number.isFinite(idx) || idx < 0) {
+      return reply.code(400).send({ error: 'invalid pane index' });
+    }
+    const output = cliCommander.captureTeamPaneOutput(idx);
+    return { paneIndex: idx, output };
+  });
+
   /** Get current session status */
   fastify.get('/current', async (req, reply) => {
     const session = cliCommander.getSession();

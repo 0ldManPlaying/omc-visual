@@ -1,5 +1,5 @@
 import { spawn, execFileSync, execSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join, normalize } from 'path';
 
@@ -65,6 +65,7 @@ export class CLICommander {
     this.tmuxSessionName = null;
     this.tmuxPollTimer = null;
     this._pollStartTimeout = null;
+    this._lastTeamPaneSig = null;
     this.lastPaneText = '';
     this.completionFinalizeTimer = null;
   }
@@ -321,7 +322,18 @@ export class CLICommander {
 
     let cliBody = String(prompt).trim();
     if (expandedFiles.length) {
-      cliBody += `\n\nContext files: ${expandedFiles.join(', ')}`;
+      const fileContents = expandedFiles
+        .map((f) => {
+          try {
+            const content = readFileSync(f, 'utf-8');
+            const name = f.split(/[/\\]/).pop();
+            return `\n--- File: ${name} (${f}) ---\n${content}\n--- End ${name} ---`;
+          } catch (err) {
+            return `\n--- File: ${f} --- (could not read: ${err.message}) ---`;
+          }
+        })
+        .join('\n');
+      cliBody += `\n\nAttached context files:${fileContents}`;
     }
     const maxTok = options.maxTokens;
     if (maxTok != null && Number.isFinite(Number(maxTok))) {
@@ -427,6 +439,12 @@ export class CLICommander {
     this.activeProcess.on('close', (code) => {
       // Launcher exit is normal; tmux session + polling keep running — do not stop polling.
       this.activeProcess = null;
+      console.log(
+        '[clawhip] Launcher exited with code',
+        code,
+        '— polling continues for tmux session:',
+        this.tmuxSessionName
+      );
       this.emitOutput(sessionId, {
         type: 'stderr',
         sessionId,
@@ -449,6 +467,12 @@ export class CLICommander {
       this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
     });
 
+    console.log(
+      '[clawhip] Scheduling tmux poll start in 2s for session:',
+      tmuxSession,
+      'sessionId:',
+      sessionId
+    );
     // Defer polling until tmux session exists (launcher often exits within ~1s).
     this.scheduleDeferredTmuxPolling(sessionId);
   }
@@ -521,6 +545,12 @@ export class CLICommander {
 
     this.activeProcess.on('close', (code) => {
       this.activeProcess = null;
+      console.log(
+        '[tmux] Launcher exited with code',
+        code,
+        '— polling continues for tmux session:',
+        this.tmuxSessionName
+      );
       this.emitOutput(sessionId, {
         type: 'stderr',
         sessionId,
@@ -543,6 +573,12 @@ export class CLICommander {
       this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
     });
 
+    console.log(
+      '[tmux] Scheduling tmux poll start in 2s for session:',
+      tmuxSession,
+      'sessionId:',
+      sessionId
+    );
     this.scheduleDeferredTmuxPolling(sessionId);
   }
 
@@ -553,6 +589,12 @@ export class CLICommander {
     }
     const capturedSessionId = sessionId;
     const capturedTmuxName = this.tmuxSessionName;
+    console.log(
+      '[tmux-poll] Scheduling deferred start in 2s for tmux:',
+      this.tmuxSessionName,
+      'sessionId:',
+      sessionId
+    );
     this._pollStartTimeout = setTimeout(() => {
       this._pollStartTimeout = null;
       if (this.tmuxSessionName !== capturedTmuxName) return;
@@ -604,6 +646,82 @@ export class CLICommander {
     });
   }
 
+  /** List panes in window 0 of the active tmux session (team splits live here). */
+  getTeamPanes() {
+    if (!this.tmuxSessionName) return [];
+    const windowTarget = `${this.tmuxSessionName}:0`;
+    try {
+      const out = execFileSync(
+        'tmux',
+        [
+          'list-panes',
+          '-t',
+          windowTarget,
+          '-F',
+          '#{pane_index}\t#{pane_pid}\t#{pane_active}\t#{pane_current_command}',
+        ],
+        { encoding: 'utf-8', maxBuffer: 1024 * 1024 }
+      );
+      return out
+        .split('\n')
+        .map((line) => line.trimEnd())
+        .filter(Boolean)
+        .map((line) => {
+          const parts = line.split('\t');
+          const index = Number(parts[0]);
+          const pid = Number(parts[1]);
+          const active = parts[2] === '1';
+          const command = parts.slice(3).join('\t') || '';
+          return { index, pid, active, command };
+        })
+        .filter((p) => Number.isFinite(p.index));
+    } catch {
+      return [];
+    }
+  }
+
+  captureTeamPaneOutput(paneIndex) {
+    if (!this.tmuxSessionName) return '';
+    const idx = Number(paneIndex);
+    if (!Number.isFinite(idx) || idx < 0) return '';
+    const target = `${this.tmuxSessionName}:0.${idx}`;
+    try {
+      return execFileSync(
+        'tmux',
+        ['capture-pane', '-t', target, '-p', '-S', '-200'],
+        { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 }
+      );
+    } catch {
+      return '';
+    }
+  }
+
+  maybeBroadcastTeamPaneUpdate() {
+    if (!this.tmuxSessionName) return;
+    try {
+      const panes = this.getTeamPanes();
+      const sig = panes.map((p) => `${p.index}:${p.pid}:${p.active}`).join('|');
+      if (sig === this._lastTeamPaneSig) return;
+      this._lastTeamPaneSig = sig;
+      const workerCount = Math.max(0, panes.length - 1);
+      this.wsHub.broadcastChannel('workers', {
+        type: 'team_panes_update',
+        teamActive: panes.length > 1,
+        workers: workerCount,
+        panes: panes.map((p) => ({
+          index: p.index,
+          pid: p.pid,
+          active: p.active,
+          command: p.command,
+          role: p.index === 0 ? 'lead' : `worker-${p.index}`,
+        })),
+        timestamp: new Date().toISOString(),
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
   attachProcessStreams(sessionId) {
     if (!this.activeProcess) return;
     this.activeProcess.stdout?.on('data', (data) => {
@@ -623,24 +741,34 @@ export class CLICommander {
   }
 
   startTmuxPolling(sessionId) {
+    console.log(
+      '[tmux-poll] startTmuxPolling called. tmuxSessionName:',
+      this.tmuxSessionName,
+      'sessionId:',
+      sessionId
+    );
     if (!this.tmuxSessionName) {
-      console.log('[tmux-poll] startTmuxPolling skipped: no tmuxSessionName');
+      console.log('[tmux-poll] PROBLEM: tmuxSessionName is null! Cannot start polling.');
       return;
     }
     this.clearTmuxPoll();
+    this._lastTeamPaneSig = null;
 
     const tmuxSession = this.tmuxSessionName;
-    console.log('[tmux-poll] Starting polling for session:', tmuxSession, 'omc sessionId:', sessionId);
+    const leadPaneTarget = `${tmuxSession}:0.0`;
+    console.log('[tmux-poll] Starting polling for lead pane:', leadPaneTarget, 'omc sessionId:', sessionId);
 
     this.tmuxPollTimer = setInterval(() => {
       if (!this.tmuxSessionName) {
+        console.log('[tmux-poll] Stopping poll loop: tmuxSessionName became null');
         this.clearTmuxPoll();
         return;
       }
+      this.maybeBroadcastTeamPaneUpdate();
       try {
         const text = execFileSync(
           'tmux',
-          ['capture-pane', '-t', this.tmuxSessionName, '-p', '-S', '-400'],
+          ['capture-pane', '-t', leadPaneTarget, '-p', '-S', '-400'],
           { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 }
         );
         console.log('[tmux-poll] Capture result:', text.length, 'chars');
@@ -680,6 +808,7 @@ export class CLICommander {
       const name = this.tmuxSessionName;
       clearInterval(this.tmuxPollTimer);
       this.tmuxPollTimer = null;
+      this._lastTeamPaneSig = null;
       if (name) console.log('[tmux-poll] Polling stopped for session:', name);
     }
   }

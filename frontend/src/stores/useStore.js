@@ -50,6 +50,9 @@ export const useStore = create((set, get) => ({
   // Worker events (from Clawhip)
   workerEvents: [],
 
+  /** Last tmux team pane layout from WS `team_panes_update` */
+  teamPanes: null,
+
   // State events (.omc/ changes)
   stateEvents: [],
 
@@ -80,6 +83,7 @@ export const useStore = create((set, get) => ({
       workerEvents: [],
       stateEvents: [],
       lastTmuxSession: null,
+      teamPanes: null,
     });
   },
 
@@ -201,9 +205,22 @@ export const useStore = create((set, get) => ({
             break;
           }
 
-          case 'workers':
-            set({ workerEvents: [...state.workerEvents.slice(-100), msg] });
+          case 'workers': {
+            if (msg.type === 'team_panes_update') {
+              set({
+                teamPanes: {
+                  teamActive: msg.teamActive,
+                  workers: msg.workers,
+                  panes: msg.panes || [],
+                  timestamp: msg.timestamp,
+                },
+                workerEvents: [...state.workerEvents.slice(-100), msg],
+              });
+            } else {
+              set({ workerEvents: [...state.workerEvents.slice(-100), msg] });
+            }
             break;
+          }
 
           case 'state':
             set({ stateEvents: [...state.stateEvents.slice(-120), msg] });
@@ -211,7 +228,7 @@ export const useStore = create((set, get) => ({
 
           case 'session':
             if (msg.type === 'ended' || msg.type === 'stopped' || msg.type === 'killed') {
-              set({ session: null });
+              set({ session: null, teamPanes: null });
               break;
             }
             if (msg.type === 'completed' && msg.session != null) {
@@ -410,6 +427,7 @@ export const useStore = create((set, get) => ({
         serverStatus: data,
         session: data.session,
         ...(tFromApi ? { lastTmuxSession: tFromApi } : {}),
+        ...(!data.session ? { teamPanes: null } : {}),
       });
     } catch {
       set({ serverStatus: null });

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { apiUrl, useStore } from '../stores/useStore';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
@@ -41,6 +41,14 @@ function joinWorkdirAndFileName(workdir, fileName) {
   return `${base}/${name}`.replace(/\/+/g, '/');
 }
 
+/** Paths sent to the server: absolute / ~/ unchanged; relative names joined with workdir. */
+function resolveContextPathForBackend(rawPath, workdir) {
+  const t = String(rawPath || '').trim();
+  if (!t) return t;
+  if (t.startsWith('/') || t.startsWith('~')) return t;
+  return joinWorkdirAndFileName(workdir, t);
+}
+
 export default function MissionControl() {
   const activeServer = useStore((s) => s.activeServer);
   const [searchParams] = useSearchParams();
@@ -64,6 +72,11 @@ export default function MissionControl() {
 
   const fileInputRef = useRef(null);
   const navigate = useNavigate();
+
+  const resolvedContextFiles = useMemo(() => {
+    const wd = workdir.trim() || '~';
+    return contextFiles.map((p) => resolveContextPathForBackend(p, wd));
+  }, [contextFiles, workdir]);
 
   useEffect(() => {
     const mode = searchParams.get('mode');
@@ -167,6 +180,7 @@ export default function MissionControl() {
 
     const wd = workdir.trim() || '~';
     const options = buildOptions();
+    const files = resolvedContextFiles;
 
     try {
       const endpoint =
@@ -178,7 +192,7 @@ export default function MissionControl() {
               role: 'executor',
               prompt: prompt.trim(),
               workdir: wd,
-              files: contextFiles,
+              files,
               options,
               force,
             }
@@ -186,7 +200,7 @@ export default function MissionControl() {
               mode: selectedMode,
               prompt: prompt.trim(),
               workdir: wd,
-              files: contextFiles,
+              files,
               options,
               force,
             };
@@ -460,6 +474,18 @@ export default function MissionControl() {
                 </button>
               </span>
             ))}
+          </div>
+        )}
+        {resolvedContextFiles.length > 0 && (
+          <div className="mt-3 rounded-lg border border-[#1a2e28] bg-[#0a1612]/80 px-3 py-2">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-[#3a5a50] mb-1">
+              Paths sent to server
+            </div>
+            <ul className="space-y-0.5 font-mono text-[12px] text-[#7a9a90] break-all">
+              {resolvedContextFiles.map((path, i) => (
+                <li key={`${path}-${i}`}>{path}</li>
+              ))}
+            </ul>
           </div>
         )}
       </div>
