@@ -11,8 +11,37 @@
 </p>
 
 <!-- screenshot -->
-> **Add screenshot here** — a full-page capture of the Dashboard or Live Monitor in action.
+## Screenshots
 
+### Dashboard
+System status, quick-launch buttons, Clawhip event feed — everything at a glance.
+
+![Dashboard](docs/screenshots/home.png)
+
+### Mission Control
+Write your prompt, pick a mode, set a working directory, attach context files, and hit Launch.
+
+![Mission Control](docs/screenshots/missioncontrol.png)
+
+### Session History
+Browse past sessions, see duration and exit codes, replay terminal output.
+
+![Session History](docs/screenshots/sessionhistroy.png)
+
+### Agent Roster
+All agents across three model tiers — Opus, Sonnet, and Haiku.
+
+![Agents](docs/screenshots/Agents.png)
+
+### HUD Metrics
+Token usage, cost tracking, and session analytics.
+
+![HUD Metrics](docs/screenshots/hud.png)
+
+### Tool Library
+CLI-Anything tools — Blender, GIMP, LibreOffice and more.
+
+![Tool Library](docs/screenshots/tools.png)
 ---
 
 ## What is OMC Visual?
