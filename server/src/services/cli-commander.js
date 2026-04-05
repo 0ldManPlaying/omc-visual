@@ -15,6 +15,17 @@ function resolveClawhipBin() {
   return null;
 }
 
+/** OMC CLI on PATH — used to start real `omc team` sessions (tmux + `.omc/state/team/`). */
+function resolveOmcBin() {
+  try {
+    const which = execSync('which omc 2>/dev/null', { encoding: 'utf-8' }).trim();
+    if (which && existsSync(which)) return which;
+  } catch {
+    /* not on PATH */
+  }
+  return null;
+}
+
 function expandUserPath(p) {
   if (typeof p !== 'string') return homedir();
   const t = p.trim();
@@ -61,8 +72,9 @@ function buildClaudeSpawnArgs(mode, fullPrompt, { model } = {}) {
 }
 
 /**
- * CLI Commander — print modes (`-p`, all except team): direct `claude` spawn, stdout/stderr → WebSocket.
- * Team mode: Clawhip or bare tmux + capture-pane polling. Session end: process exit, pane_gone, or Stop/Kill.
+ * CLI Commander — print modes (`-p`): direct `claude` stdout/stderr → WebSocket.
+ * Team mode: prefer `omc team N:claude:role` (OMC-native tmux + state); else Clawhip/tmux + Claude prompt.
+ * Session end: process exit (direct), pane_gone (tmux), or Stop/Kill.
  */
 export class CLICommander {
   constructor(wsHub, sessionStore = null) {
@@ -77,6 +89,26 @@ export class CLICommander {
     /** Last full tmux capture-pane buffer (lead pane); used only for delta / replace in polling. */
     this._lastPaneText = '';
     this.completionFinalizeTimer = null;
+  }
+
+  /**
+   * tmux window target for list-panes / layout: OMC returns `session:window`; legacy Visual used session-only.
+   */
+  tmuxWindowTargetForListPanes() {
+    if (!this.tmuxSessionName) return null;
+    return this.tmuxSessionName.includes(':') ? this.tmuxSessionName : `${this.tmuxSessionName}:0`;
+  }
+
+  /** Lead pane `.0` for capture-pane polling */
+  tmuxLeadPaneTarget() {
+    const w = this.tmuxWindowTargetForListPanes();
+    return w ? `${w}.0` : null;
+  }
+
+  /** `kill-session -t` wants session name only */
+  tmuxKillSessionTarget() {
+    if (!this.tmuxSessionName) return null;
+    return this.tmuxSessionName.split(':')[0];
   }
 
   /** Persist terminal output for replay, then broadcast to WebSocket clients */
@@ -365,18 +397,35 @@ export class CLICommander {
     const staleMinutes = Number.isFinite(staleRaw) && staleRaw > 0 ? staleRaw : 5;
     const clawhipMonitoring = options.clawhipMonitoring !== false;
 
-    const fullPrompt = this.buildFullPrompt(mode, cliBody);
+    const omcBin = resolveOmcBin();
+    const teamLaunch = options.teamLaunch;
+
+    const fullPromptForStore =
+      mode === 'team' && teamLaunch && typeof teamLaunch === 'object'
+        ? cliBody
+        : this.buildFullPrompt(mode, cliBody);
+
+    let launchPrompt = fullPromptForStore;
+    if (mode === 'team' && teamLaunch && typeof teamLaunch === 'object') {
+      const w = Number(teamLaunch.workers) || 3;
+      const r = String(teamLaunch.role || 'executor').trim() || 'executor';
+      launchPrompt = `team ${w}:${r} ${cliBody}`;
+    }
+
     const storedPrompt = String(userPrompt ?? prompt).trim();
     const tmuxSession = `omc-session-${sessionId.replace(/^omc-/, '')}`;
+
+    const useOmcTeamCli = mode === 'team' && teamLaunch && typeof teamLaunch === 'object' && omcBin;
 
     this.session = {
       id: sessionId,
       mode,
       prompt: storedPrompt,
-      fullPrompt,
+      fullPrompt: fullPromptForStore,
       startedAt: new Date().toISOString(),
       cwd,
-      tmuxSession: useClaudePrintMode(mode) ? null : tmuxSession,
+      tmuxSession:
+        useClaudePrintMode(mode) ? null : useOmcTeamCli ? null : tmuxSession,
       keywords,
       completionUiStatus: null,
     };
@@ -385,23 +434,29 @@ export class CLICommander {
 
     const clawhip = resolveClawhipBin();
     if (useClaudePrintMode(mode)) {
-      this.startDirectSpawn({ cwd, sessionId, fullPrompt, mode, model });
+      this.startDirectSpawn({ cwd, sessionId, fullPrompt: fullPromptForStore, mode, model });
+    } else if (useOmcTeamCli) {
+      const w = Number(teamLaunch.workers) || 3;
+      const r = String(teamLaunch.role || 'executor').trim() || 'executor';
+      const agent = String(teamLaunch.agentType || 'claude').trim() || 'claude';
+      const teamSpec = `${w}:${agent}:${r}`;
+      this.startTeamViaOmcCli({ omcBin, cwd, sessionId, teamSpec, taskText: cliBody, model });
     } else if (clawhip && clawhipMonitoring) {
       this.startWithClawhip({
         clawhip,
         cwd,
         tmuxSession,
         sessionId,
-        fullPrompt,
+        fullPrompt: launchPrompt,
         mode,
         keywords,
         staleMinutes,
         model,
       });
     } else if (clawhip && !clawhipMonitoring) {
-      this.startWithBareTmux({ cwd, tmuxSession, sessionId, fullPrompt, mode, model });
+      this.startWithBareTmux({ cwd, tmuxSession, sessionId, fullPrompt: launchPrompt, mode, model });
     } else {
-      this.startWithBareTmux({ cwd, tmuxSession, sessionId, fullPrompt, mode, model });
+      this.startWithBareTmux({ cwd, tmuxSession, sessionId, fullPrompt: launchPrompt, mode, model });
     }
 
     this.wsHub.broadcastChannel('session', {
@@ -499,7 +554,7 @@ export class CLICommander {
     }
     this.clearCompletionFinalizeTimer();
     this.clearTmuxPoll();
-    const tmuxName = this.tmuxSessionName;
+    const tmuxName = this.tmuxKillSessionTarget();
     if (tmuxName) {
       try {
         execFileSync('tmux', ['kill-session', '-t', tmuxName], { stdio: 'ignore' });
@@ -695,10 +750,117 @@ export class CLICommander {
     });
   }
 
+  /**
+   * Run `omc team N:claude:role "<task>" --json` — matches OMC CLI team start (runtime-v2, tmux topology).
+   * Parses sessionName from JSON line on stdout, then attaches tmux polling to that target.
+   */
+  startTeamViaOmcCli({ omcBin, cwd, sessionId, teamSpec, taskText, model }) {
+    this.tmuxSessionName = null;
+    this._lastPaneText = '';
+    let stdoutBuf = '';
+    const args = ['team', teamSpec, taskText, '--json'];
+    const env = {
+      ...process.env,
+      FORCE_COLOR: '1',
+      TERM: 'xterm-256color',
+    };
+    if (model) {
+      env.CLAUDE_MODEL = model;
+    }
+
+    this.activeProcess = spawn(omcBin, args, {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+    });
+
+    this.activeProcess.stdout?.on('data', (data) => {
+      const text = data.toString();
+      stdoutBuf += text;
+      this.emitOutput(sessionId, { type: 'stdout', sessionId, text });
+    });
+    this.activeProcess.stderr?.on('data', (data) => {
+      const text = data.toString();
+      stdoutBuf += text;
+      this.emitOutput(sessionId, { type: 'stderr', sessionId, text });
+    });
+
+    this.activeProcess.on('close', (code) => {
+      this.activeProcess = null;
+      if (!this.session || this.session.id !== sessionId) return;
+
+      let sessionName = null;
+      let teamName = null;
+      try {
+        const lines = stdoutBuf.split('\n');
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const line = lines[i].trim();
+          if (!line.startsWith('{')) continue;
+          const j = JSON.parse(line);
+          if (j.sessionName) {
+            sessionName = j.sessionName;
+            teamName = j.teamName ?? null;
+            break;
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+      if (!sessionName) {
+        const m = stdoutBuf.match(/tmux session:\s*(\S+)/);
+        if (m) sessionName = m[1].trim();
+      }
+
+      if (code !== 0 || !sessionName) {
+        console.error('[CLICommander] omc team failed', { code, sessionName });
+        this.emitOutput(sessionId, {
+          type: 'error',
+          sessionId,
+          message: `omc team failed (exit ${code ?? 'null'})${sessionName ? '' : ' — no sessionName in JSON'}`,
+        });
+        const id = this.session.id;
+        this.clearTmuxPoll();
+        this.tmuxSessionName = null;
+        this.session = null;
+        if (id && this.sessionStore) this.sessionStore.endSession(id, 'error');
+        this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
+        return;
+      }
+
+      this.tmuxSessionName = sessionName;
+      if (teamName && this.session) {
+        this.session.omcTeamName = teamName;
+      }
+      console.log('[CLICommander] omc team tmux:', sessionName, 'team:', teamName);
+      this.wsHub.broadcastChannel('session', {
+        type: 'started',
+        session: this.getSession(),
+      });
+      this.scheduleDeferredTmuxPolling(sessionId);
+    });
+
+    this.activeProcess.on('error', (err) => {
+      if (!this.session || this.session.id !== sessionId) return;
+      this.emitOutput(sessionId, {
+        type: 'error',
+        sessionId,
+        message: err.message,
+      });
+      this.activeProcess = null;
+      const id = this.session.id;
+      this.clearTmuxPoll();
+      this.tmuxSessionName = null;
+      this.session = null;
+      if (id && this.sessionStore) this.sessionStore.endSession(id, 'error');
+      this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
+    });
+  }
+
   /** List panes in window 0 of the active tmux session (team splits live here). */
   getTeamPanes() {
-    if (!this.tmuxSessionName) return [];
-    const windowTarget = `${this.tmuxSessionName}:0`;
+    const windowTarget = this.tmuxWindowTargetForListPanes();
+    if (!windowTarget) return [];
     try {
       const out = execFileSync(
         'tmux',
@@ -730,10 +892,11 @@ export class CLICommander {
   }
 
   captureTeamPaneOutput(paneIndex) {
-    if (!this.tmuxSessionName) return '';
+    const base = this.tmuxWindowTargetForListPanes();
+    if (!base) return '';
     const idx = Number(paneIndex);
     if (!Number.isFinite(idx) || idx < 0) return '';
-    const target = `${this.tmuxSessionName}:0.${idx}`;
+    const target = `${base}.${idx}`;
     try {
       return execFileSync(
         'tmux',
@@ -805,8 +968,11 @@ export class CLICommander {
     // Fresh baseline so we never skip the first emit because of a stale buffer from a prior poll/session.
     this._lastPaneText = '';
 
-    const tmuxSession = this.tmuxSessionName;
-    const leadPaneTarget = `${tmuxSession}:0.0`;
+    const leadPaneTarget = this.tmuxLeadPaneTarget();
+    if (!leadPaneTarget) {
+      console.log('[tmux-poll] No lead pane target; abort polling.');
+      return;
+    }
     console.log('[tmux-poll] Starting polling for lead pane:', leadPaneTarget, 'omc sessionId:', sessionId);
 
     this.tmuxPollTimer = setInterval(() => {
@@ -911,9 +1077,10 @@ export class CLICommander {
     this.clearCompletionFinalizeTimer();
     this.clearTmuxPoll();
 
-    if (this.tmuxSessionName) {
+    const killTmux = this.tmuxKillSessionTarget();
+    if (killTmux) {
       try {
-        execFileSync('tmux', ['kill-session', '-t', this.tmuxSessionName], { stdio: 'ignore' });
+        execFileSync('tmux', ['kill-session', '-t', killTmux], { stdio: 'ignore' });
       } catch {
         // ignore
       }
@@ -966,7 +1133,7 @@ export class CLICommander {
     }
 
     const prevId = this.session?.id;
-    const tmuxName = this.tmuxSessionName;
+    const tmuxName = this.tmuxKillSessionTarget();
 
     this.clearCompletionFinalizeTimer();
     this.clearTmuxPoll();

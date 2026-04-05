@@ -60,14 +60,20 @@ export async function sessionRoutes(fastify) {
       }
 
       const task = String(prompt).trim();
-      const teamPrompt = `team ${workers}:${role} ${task}`;
       const session = await cliCommander.startSession({
         mode: 'team',
-        prompt: teamPrompt,
+        prompt: task,
         userPrompt: task,
         workdir,
         files: Array.isArray(files) ? files : [],
-        options: options && typeof options === 'object' ? options : {},
+        options: {
+          ...(options && typeof options === 'object' ? options : {}),
+          teamLaunch: {
+            workers: Number(workers) || 3,
+            role: String(role || 'executor').trim() || 'executor',
+            agentType: 'claude',
+          },
+        },
         force: Boolean(force),
       });
       return { status: 'started', session };
