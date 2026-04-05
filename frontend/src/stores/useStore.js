@@ -195,7 +195,9 @@ export const useStore = create((set, get) => ({
 
         switch (msg.channel) {
           case 'output': {
-            const nextLines = [...state.outputLines.slice(-500), msg];
+            const nextLines = msg.replacePane
+              ? [msg]
+              : [...state.outputLines.slice(-500), msg];
             let nextTmux = state.lastTmuxSession;
             if (msg.sessionId) {
               const t = sessionIdToTmuxName(msg.sessionId);

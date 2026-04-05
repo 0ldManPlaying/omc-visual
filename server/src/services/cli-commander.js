@@ -3,6 +3,9 @@ import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join, normalize } from 'path';
 
+/** Printed by Claude when done; tmux poll detects this to end the session cleanly. */
+const OMC_FINISH_MARKER = '===OMC_SESSION_COMPLETE===';
+
 function resolveClawhipBin() {
   const cargo = join(homedir(), '.cargo', 'bin', 'clawhip');
   if (existsSync(cargo)) return cargo;
@@ -66,7 +69,8 @@ export class CLICommander {
     this.tmuxPollTimer = null;
     this._pollStartTimeout = null;
     this._lastTeamPaneSig = null;
-    this.lastPaneText = '';
+    /** Last full tmux capture-pane buffer (lead pane); used only for delta / replace in polling. */
+    this._lastPaneText = '';
     this.completionFinalizeTimer = null;
   }
 
@@ -82,7 +86,7 @@ export class CLICommander {
           if (t) this.sessionStore.saveOutputChunk(sessionId, t, 'error');
         } else if (type === 'exit') {
           this.sessionStore.saveOutputChunk(sessionId, `[exit] ${String(code)}`, 'error');
-        } else if (text != null && String(text)) {
+        } else if (text != null && String(text) && !payload.replacePane) {
           this.sessionStore.saveOutputChunk(sessionId, String(text), 'output');
         }
       } catch (e) {
@@ -187,7 +191,7 @@ export class CLICommander {
     };
     this.tmuxSessionName = tmuxSession;
     this.activeProcess = null;
-    this.lastPaneText = '';
+    this._lastPaneText = '';
 
     this.session.keywords =
       typeof row?.keywords === 'string' && row.keywords.trim()
@@ -232,7 +236,7 @@ export class CLICommander {
       }
       this.session = null;
       this.tmuxSessionName = null;
-      this.lastPaneText = '';
+      this._lastPaneText = '';
       this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
     }
 
@@ -344,6 +348,8 @@ export class CLICommander {
       cliBody += `\n\n(OMC Visual: prefer responses under ~${Number(maxTok)} output tokens where practical.)`;
     }
 
+    cliBody += `\n\nIMPORTANT: When you have fully completed the task, print exactly this line on its own as your final output:\n${OMC_FINISH_MARKER}`;
+
     const model =
       typeof options.model === 'string' && options.model.trim()
         ? options.model.trim().toLowerCase()
@@ -436,7 +442,7 @@ export class CLICommander {
     );
 
     this.tmuxSessionName = tmuxSession;
-    this.lastPaneText = '';
+    this._lastPaneText = '';
 
     this.attachProcessStreams(sessionId);
 
@@ -497,13 +503,50 @@ export class CLICommander {
       }
     }
     this.tmuxSessionName = null;
-    this.lastPaneText = '';
+    this._lastPaneText = '';
     this.activeProcess = null;
     const id = this.session.id;
     if (this.sessionStore) {
       this.sessionStore.endSession(id, 0);
     }
     this.session = null;
+    this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
+  }
+
+  /** Immediate completion when Claude prints OMC_FINISH_MARKER in the tmux pane (no 5s delay). */
+  completeSessionAfterFinishMarker(sessionId) {
+    if (!this.session || this.session.id !== sessionId) return;
+    this.clearCompletionFinalizeTimer();
+    this.clearTmuxPoll();
+    const tmuxName = this.tmuxSessionName;
+    if (tmuxName) {
+      try {
+        execFileSync('tmux', ['kill-session', '-t', tmuxName], { stdio: 'ignore' });
+      } catch {
+        /* ignore */
+      }
+    }
+    this.tmuxSessionName = null;
+    this._lastPaneText = '';
+    this.activeProcess = null;
+    const snap = {
+      id: this.session.id,
+      mode: this.session.mode,
+      prompt: this.session.prompt,
+      startedAt: this.session.startedAt,
+      status: 'completed',
+      tmuxSession: null,
+    };
+    const id = this.session.id;
+    if (this.sessionStore) {
+      this.sessionStore.endSession(id, 0);
+    }
+    this.session = null;
+    this.wsHub.broadcastChannel('session', {
+      type: 'completed',
+      session: snap,
+      reason: 'finish_marker',
+    });
     this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
   }
 
@@ -543,7 +586,7 @@ export class CLICommander {
     );
 
     this.tmuxSessionName = tmuxSession;
-    this.lastPaneText = '';
+    this._lastPaneText = '';
 
     this.attachProcessStreams(sessionId);
 
@@ -758,7 +801,7 @@ export class CLICommander {
     this.clearTmuxPoll();
     this._lastTeamPaneSig = null;
     // Fresh baseline so we never skip the first emit because of a stale buffer from a prior poll/session.
-    this.lastPaneText = '';
+    this._lastPaneText = '';
 
     const tmuxSession = this.tmuxSessionName;
     const leadPaneTarget = `${tmuxSession}:0.0`;
@@ -778,34 +821,46 @@ export class CLICommander {
           { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 }
         );
         console.log('[tmux-poll] Capture result:', text.length, 'chars');
-        if (text === this.lastPaneText) {
-          return;
-        }
         console.log(
-          '[tmux-poll] Raw capture length:',
+          '[tmux-poll] Delta check — current length:',
           text.length,
-          'lastPaneText length:',
-          this.lastPaneText?.length ?? 0
+          'previous length:',
+          (this._lastPaneText || '').length,
+          'changed:',
+          text !== this._lastPaneText
         );
-        let delta = '';
-        if (this.lastPaneText.length > 0 && text.startsWith(this.lastPaneText)) {
-          delta = text.slice(this.lastPaneText.length);
-        } else if (this.lastPaneText.length === 0) {
-          // First snapshot (or after reset): ship full buffer so Live Monitor always gets initial content.
-          delta = text;
-        } else {
-          // Scrollback / clear: tmux buffer no longer extends the previous snapshot.
-          delta = text;
-        }
-        console.log('[tmux-poll] Delta length:', delta.length, 'will emit:', delta.length > 0);
-        this.lastPaneText = text;
-        if (delta.length > 0) {
+
+        if (text.includes(OMC_FINISH_MARKER)) {
+          console.log('[tmux-poll] Finish marker detected! Session complete.');
+          if (text !== this._lastPaneText) {
+            this._lastPaneText = text;
+            this.emitOutput(sessionId, {
+              type: 'stdout',
+              sessionId,
+              text,
+              replacePane: true,
+            });
+          }
           this.emitOutput(sessionId, {
             type: 'stdout',
             sessionId,
-            text: delta,
+            text: '\n✅ Task completed\n',
           });
+          this.completeSessionAfterFinishMarker(sessionId);
+          return;
         }
+
+        if (text === this._lastPaneText) {
+          return;
+        }
+
+        this._lastPaneText = text;
+        this.emitOutput(sessionId, {
+          type: 'stdout',
+          sessionId,
+          text,
+          replacePane: true,
+        });
       } catch (err) {
         const msg = err && typeof err.message === 'string' ? err.message : String(err);
         console.log('[tmux-poll] Capture failed:', msg);
@@ -881,7 +936,7 @@ export class CLICommander {
         // ignore
       }
       this.tmuxSessionName = null;
-      this.lastPaneText = '';
+      this._lastPaneText = '';
     }
 
     if (this.activeProcess) {
@@ -941,7 +996,7 @@ export class CLICommander {
         /* ignore */
       }
       this.tmuxSessionName = null;
-      this.lastPaneText = '';
+      this._lastPaneText = '';
     }
 
     if (this.activeProcess) {
