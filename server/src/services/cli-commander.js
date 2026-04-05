@@ -73,16 +73,20 @@ export class CLICommander {
   /** Persist terminal output for replay, then broadcast to WebSocket clients */
   emitOutput(sessionId, payload) {
     if (this.sessionStore && sessionId) {
-      const { type, text, message, code } = payload;
-      if (type === 'stderr' && text != null && String(text)) {
-        this.sessionStore.saveOutputChunk(sessionId, String(text), 'stderr');
-      } else if (type === 'error') {
-        const t = message != null ? String(message) : '';
-        if (t) this.sessionStore.saveOutputChunk(sessionId, t, 'error');
-      } else if (type === 'exit') {
-        this.sessionStore.saveOutputChunk(sessionId, `[exit] ${String(code)}`, 'error');
-      } else if (text != null && String(text)) {
-        this.sessionStore.saveOutputChunk(sessionId, String(text), 'output');
+      try {
+        const { type, text, message, code } = payload;
+        if (type === 'stderr' && text != null && String(text)) {
+          this.sessionStore.saveOutputChunk(sessionId, String(text), 'stderr');
+        } else if (type === 'error') {
+          const t = message != null ? String(message) : '';
+          if (t) this.sessionStore.saveOutputChunk(sessionId, t, 'error');
+        } else if (type === 'exit') {
+          this.sessionStore.saveOutputChunk(sessionId, `[exit] ${String(code)}`, 'error');
+        } else if (text != null && String(text)) {
+          this.sessionStore.saveOutputChunk(sessionId, String(text), 'output');
+        }
+      } catch (e) {
+        console.warn('[emitOutput] sessionStore save failed (still broadcasting to WS):', e.message);
       }
     }
     this.wsHub.broadcastChannel('output', payload);
@@ -753,6 +757,8 @@ export class CLICommander {
     }
     this.clearTmuxPoll();
     this._lastTeamPaneSig = null;
+    // Fresh baseline so we never skip the first emit because of a stale buffer from a prior poll/session.
+    this.lastPaneText = '';
 
     const tmuxSession = this.tmuxSessionName;
     const leadPaneTarget = `${tmuxSession}:0.0`;
@@ -775,14 +781,25 @@ export class CLICommander {
         if (text === this.lastPaneText) {
           return;
         }
+        console.log(
+          '[tmux-poll] Raw capture length:',
+          text.length,
+          'lastPaneText length:',
+          this.lastPaneText?.length ?? 0
+        );
         let delta = '';
-        if (text.startsWith(this.lastPaneText)) {
+        if (this.lastPaneText.length > 0 && text.startsWith(this.lastPaneText)) {
           delta = text.slice(this.lastPaneText.length);
+        } else if (this.lastPaneText.length === 0) {
+          // First snapshot (or after reset): ship full buffer so Live Monitor always gets initial content.
+          delta = text;
         } else {
+          // Scrollback / clear: tmux buffer no longer extends the previous snapshot.
           delta = text;
         }
+        console.log('[tmux-poll] Delta length:', delta.length, 'will emit:', delta.length > 0);
         this.lastPaneText = text;
-        if (delta) {
+        if (delta.length > 0) {
           this.emitOutput(sessionId, {
             type: 'stdout',
             sessionId,
