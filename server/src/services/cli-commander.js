@@ -54,11 +54,21 @@ function buildClaudeBashInvocation(mode, fullPrompt, { model } = {}) {
   return `claude${printPart}${modelPart} ${quoted}`;
 }
 
-/** argv for direct spawn (no shell) — `-p` when not team; skip permissions only in autopilot */
+/**
+ * argv for direct spawn (no shell).
+ * Print modes: `-p --verbose --output-format stream-json --include-partial-messages` for real-time NDJSON
+ * (Claude requires `--verbose` with stream-json). Team mode unchanged (not used here).
+ */
 function buildClaudeSpawnArgs(mode, fullPrompt, { model } = {}) {
   const args = [];
   if (useClaudePrintMode(mode)) {
-    args.push('-p');
+    args.push(
+      '-p',
+      '--verbose',
+      '--output-format',
+      'stream-json',
+      '--include-partial-messages'
+    );
   }
   if (model) {
     args.push('--model', model);
@@ -71,8 +81,88 @@ function buildClaudeSpawnArgs(mode, fullPrompt, { model } = {}) {
   return args;
 }
 
+function formatToolUseForStream(name, input) {
+  try {
+    const short =
+      typeof input === 'object' && input !== null ? JSON.stringify(input) : String(input ?? '');
+    const trimmed = short.length > 500 ? `${short.slice(0, 500)}…` : short;
+    return `\n▶ ${name} ${trimmed}\n`;
+  } catch {
+    return `\n▶ ${name}\n`;
+  }
+}
+
 /**
- * CLI Commander — print modes (`-p`): direct `claude` stdout/stderr → WebSocket.
+ * Map one NDJSON object from `claude -p --output-format stream-json` to UI chunks.
+ * @param {object} obj
+ * @param {{ sawTextDelta: boolean }} ctx
+ * @returns {Array<{ kind: 'stdout' | 'stderr', text: string }>}
+ */
+function streamJsonEventToUiChunks(obj, ctx) {
+  if (!obj || typeof obj !== 'object') return [];
+  const chunks = [];
+  const t = obj.type;
+
+  if (t === 'stream_event' && obj.event?.type === 'content_block_delta') {
+    const d = obj.event.delta;
+    if (d?.type === 'text_delta' && typeof d.text === 'string' && d.text) {
+      chunks.push({ kind: 'stdout', text: d.text });
+    }
+    return chunks;
+  }
+
+  if (t === 'assistant' && Array.isArray(obj.message?.content)) {
+    for (const block of obj.message.content) {
+      if (block.type === 'text' && typeof block.text === 'string' && block.text) {
+        if (!ctx.sawTextDelta) {
+          chunks.push({ kind: 'stdout', text: block.text });
+        }
+      } else if (block.type === 'tool_use' && block.name) {
+        chunks.push({ kind: 'stdout', text: formatToolUseForStream(block.name, block.input) });
+      }
+    }
+    return chunks;
+  }
+
+  if (t === 'user' && Array.isArray(obj.message?.content)) {
+    for (const block of obj.message.content) {
+      if (block.type === 'tool_result') {
+        const body =
+          typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '');
+        const prefix = block.is_error ? '[tool error] ' : '[tool] ';
+        chunks.push({
+          kind: block.is_error ? 'stderr' : 'stdout',
+          text: `${prefix}${body}\n`,
+        });
+      }
+    }
+    return chunks;
+  }
+
+  if (t === 'result') {
+    const sub = obj.is_error ? 'error' : obj.subtype || 'done';
+    const cost =
+      typeof obj.total_cost_usd === 'number' ? ` ~$${obj.total_cost_usd.toFixed(4)}` : '';
+    const dur = typeof obj.duration_ms === 'number' ? ` ${obj.duration_ms}ms` : '';
+    chunks.push({
+      kind: 'stdout',
+      text: `\n\x1b[2m── ${sub}${dur}${cost} ──\x1b[0m\n`,
+    });
+    return chunks;
+  }
+
+  if (t === 'system' && obj.subtype === 'init') {
+    const cwd = obj.cwd != null ? String(obj.cwd) : '';
+    const m = obj.model != null ? String(obj.model) : '';
+    chunks.push({ kind: 'stdout', text: `[init] cwd=${cwd} model=${m}\n` });
+    return chunks;
+  }
+
+  return chunks;
+}
+
+/**
+ * CLI Commander — print modes: direct `claude` with NDJSON stream-json (parsed) + stderr → WebSocket.
  * Team mode: prefer `omc team N:claude:role` (OMC-native tmux + state); else Clawhip/tmux + Claude prompt.
  * Session end: process exit (direct), pane_gone (tmux), or Stop/Kill.
  */
@@ -703,7 +793,76 @@ export class CLICommander {
     }, 2000);
   }
 
-  /** Direct `claude` child: stdout/stderr stream to WS (no tmux capture-pane). */
+  /** NDJSON lines from `claude -p --output-format stream-json` → human-readable WS chunks. */
+  attachStreamJsonStdout(sessionId, stream) {
+    let buf = '';
+    const ctx = { sawTextDelta: false };
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk) => {
+      buf += chunk;
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let obj;
+        try {
+          obj = JSON.parse(trimmed);
+        } catch {
+          this.emitOutput(sessionId, {
+            type: 'stdout',
+            sessionId,
+            text: `${trimmed}\n`,
+          });
+          continue;
+        }
+        if (
+          obj.type === 'stream_event' &&
+          obj.event?.type === 'content_block_delta' &&
+          obj.event.delta?.type === 'text_delta' &&
+          obj.event.delta.text
+        ) {
+          ctx.sawTextDelta = true;
+        }
+        const parts = streamJsonEventToUiChunks(obj, ctx);
+        for (const p of parts) {
+          this.emitOutput(sessionId, {
+            type: p.kind === 'stderr' ? 'stderr' : 'stdout',
+            sessionId,
+            text: p.text,
+          });
+        }
+      }
+    });
+    stream.on('end', () => {
+      const tail = buf.trim();
+      if (!tail) return;
+      try {
+        const obj = JSON.parse(tail);
+        if (
+          obj.type === 'stream_event' &&
+          obj.event?.type === 'content_block_delta' &&
+          obj.event.delta?.type === 'text_delta' &&
+          obj.event.delta.text
+        ) {
+          ctx.sawTextDelta = true;
+        }
+        for (const p of streamJsonEventToUiChunks(obj, ctx)) {
+          this.emitOutput(sessionId, {
+            type: p.kind === 'stderr' ? 'stderr' : 'stdout',
+            sessionId,
+            text: p.text,
+          });
+        }
+      } catch {
+        this.emitOutput(sessionId, { type: 'stdout', sessionId, text: `${tail}\n` });
+      }
+      buf = '';
+    });
+  }
+
+  /** Direct `claude` child: parsed stream-json on stdout; raw stderr (no tmux). */
   startDirectSpawn({ cwd, sessionId, fullPrompt, mode, model }) {
     this.tmuxSessionName = null;
     this._lastPaneText = '';
@@ -719,7 +878,16 @@ export class CLICommander {
       shell: false,
     });
 
-    this.attachProcessStreams(sessionId);
+    if (this.activeProcess.stdout) {
+      this.attachStreamJsonStdout(sessionId, this.activeProcess.stdout);
+    }
+    this.activeProcess.stderr?.on('data', (data) => {
+      this.emitOutput(sessionId, {
+        type: 'stderr',
+        sessionId,
+        text: data.toString(),
+      });
+    });
 
     this.activeProcess.on('close', (code) => {
       if (!this.session || this.session.id !== sessionId) return;

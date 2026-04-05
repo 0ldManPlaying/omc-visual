@@ -18,7 +18,8 @@ Doel: begrijpen hoe **oh-my-claudecode** output levert, teams start, en voltooii
 ### 1.2 Print mode (`claude -p`) en OMC Visual
 
 - Voor **one-shot**, niet-interactieve runs is **`claude -p`** passend: output gaat naar **stdout/stderr** van het child-proces. Dat is hetzelfde patroon als andere CLI-wrappers.
-- OMC Visual gebruikt voor niet-team modes reeds **directe `spawn('claude', …)`** met stdout/stderr → WebSocket; dat sluit aan bij `-p` gedrag.
+- **Streaming:** Claude Code 2.1+ ondersteunt **`--output-format stream-json`** (met **`--verbose`** verplicht). Dat levert **NDJSON** (één JSON-object per regel), o.a. `stream_event` + `content_block_delta` / `text_delta` voor tokengewijze tekst, plus `assistant` (tool_use), `user` (tool_result), en `result`. OMC Visual parseert die stream en stuurt leesbare chunks naar WebSocket (i.p.v. te wachten op één blok aan het einde).
+- OMC Visual gebruikt voor niet-team modes **directe `spawn('claude', …)`** met deze stream-json pipeline.
 
 **Conclusie:** Voor **team/interactieve panes** is de bron van waarheid **tmux + capture-pane (+ state files)**. Voor **-p single-agent** is de bron van waarheid **process stdout/stderr**.
 
@@ -169,4 +170,4 @@ console.log(JSON.stringify({
 - **Team start**: als `omc` op PATH staat en `/api/session/team` stuurt `options.teamLaunch`, start de server `omc team <N>:claude:<role> "<taak>" --json` met `cwd` = werkmap; `sessionName` uit JSON wordt opgeslagen als `tmuxSessionName` (vaak `sessie:venster`).
 - **tmux-targets**: `list-panes` / `capture-pane` gebruiken `tmuxWindowTargetForListPanes()` (geen dubbele `:0`); `kill-session` gebruikt alleen de sessienaam (`split(':')[0]`).
 - **Fallback**: geen `omc` → bestaand Clawhip/bare-tmux pad met `team <N>:<role> …` prompt naar Claude.
-- **Print modes**: ongewijzigd directe `claude` stdout/stderr stream.
+- **Print modes**: `claude -p --verbose --output-format stream-json --include-partial-messages`; server parseert NDJSON naar WS-chunks.
