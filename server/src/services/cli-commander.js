@@ -61,9 +61,8 @@ function buildClaudeSpawnArgs(mode, fullPrompt, { model } = {}) {
 }
 
 /**
- * CLI Commander — spawns OMC sessions via Clawhip tmux wrapper when available,
- * else direct `claude`. Tmux pane output is polled to WebSocket `output` channel.
- * Session end: tmux capture-pane failure (pane/session gone after `claude -p` exits), or Stop/Kill.
+ * CLI Commander — print modes (`-p`, all except team): direct `claude` spawn, stdout/stderr → WebSocket.
+ * Team mode: Clawhip or bare tmux + capture-pane polling. Session end: process exit, pane_gone, or Stop/Kill.
  */
 export class CLICommander {
   constructor(wsHub, sessionStore = null) {
@@ -377,7 +376,7 @@ export class CLICommander {
       fullPrompt,
       startedAt: new Date().toISOString(),
       cwd,
-      tmuxSession,
+      tmuxSession: useClaudePrintMode(mode) ? null : tmuxSession,
       keywords,
       completionUiStatus: null,
     };
@@ -385,7 +384,9 @@ export class CLICommander {
     this.sessionStore?.saveSession(this.session);
 
     const clawhip = resolveClawhipBin();
-    if (clawhip && clawhipMonitoring) {
+    if (useClaudePrintMode(mode)) {
+      this.startDirectSpawn({ cwd, sessionId, fullPrompt, mode, model });
+    } else if (clawhip && clawhipMonitoring) {
       this.startWithClawhip({
         clawhip,
         cwd,
@@ -400,7 +401,7 @@ export class CLICommander {
     } else if (clawhip && !clawhipMonitoring) {
       this.startWithBareTmux({ cwd, tmuxSession, sessionId, fullPrompt, mode, model });
     } else {
-      this.startDirectClaude({ cwd, sessionId, fullPrompt, mode, model });
+      this.startWithBareTmux({ cwd, tmuxSession, sessionId, fullPrompt, mode, model });
     }
 
     this.wsHub.broadcastChannel('session', {
@@ -535,6 +536,36 @@ export class CLICommander {
     }, 5000);
   }
 
+  /** After direct `claude` process exits (-p modes): DB + WS completed/ended (no tmux). */
+  finalizeDirectProcessSession(sessionId, exitCode) {
+    if (!this.session || this.session.id !== sessionId) return;
+    this.clearCompletionFinalizeTimer();
+    this.clearTmuxPoll();
+    this.tmuxSessionName = null;
+    this._lastPaneText = '';
+    this.activeProcess = null;
+    const snap = {
+      id: this.session.id,
+      mode: this.session.mode,
+      prompt: this.session.prompt,
+      startedAt: this.session.startedAt,
+      status: 'completed',
+      tmuxSession: null,
+    };
+    const ec =
+      typeof exitCode === 'number' && !Number.isNaN(exitCode) ? exitCode : 0;
+    if (this.sessionStore) {
+      this.sessionStore.endSession(sessionId, ec);
+    }
+    this.session = null;
+    this.wsHub.broadcastChannel('session', {
+      type: 'completed',
+      session: snap,
+      reason: 'process_exit',
+    });
+    this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
+  }
+
   /** Tmux + claude without Clawhip keyword/stale monitoring (pane capture only) */
   startWithBareTmux({ cwd, tmuxSession, sessionId, fullPrompt, mode, model }) {
     const bashCmd = buildClaudeBashInvocation(mode, fullPrompt, { model });
@@ -617,8 +648,10 @@ export class CLICommander {
     }, 2000);
   }
 
-  startDirectClaude({ cwd, sessionId, fullPrompt, mode, model }) {
+  /** Direct `claude` child: stdout/stderr stream to WS (no tmux capture-pane). */
+  startDirectSpawn({ cwd, sessionId, fullPrompt, mode, model }) {
     this.tmuxSessionName = null;
+    this._lastPaneText = '';
     const claudeArgs = buildClaudeSpawnArgs(mode, fullPrompt, { model });
     this.activeProcess = spawn('claude', claudeArgs, {
       cwd,
@@ -627,33 +660,35 @@ export class CLICommander {
         FORCE_COLOR: '1',
         TERM: 'xterm-256color',
       },
+      stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
     });
 
     this.attachProcessStreams(sessionId);
 
     this.activeProcess.on('close', (code) => {
-      if (this.session?.id && this.sessionStore) {
-        this.sessionStore.endSession(this.session.id, code ?? 0);
-      }
+      if (!this.session || this.session.id !== sessionId) return;
+      this.activeProcess = null;
+      const exitCode = code === null ? 0 : code;
       this.emitOutput(sessionId, {
         type: 'exit',
         sessionId,
-        code,
+        code: exitCode,
       });
-      this.activeProcess = null;
-      this.session = null;
-      this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
+      this.finalizeDirectProcessSession(sessionId, exitCode);
     });
 
     this.activeProcess.on('error', (err) => {
-      const id = this.session?.id;
+      if (!this.session || this.session.id !== sessionId) return;
       this.emitOutput(sessionId, {
         type: 'error',
         sessionId,
         message: err.message,
       });
       this.activeProcess = null;
+      const id = this.session.id;
+      this.clearTmuxPoll();
+      this.tmuxSessionName = null;
       this.session = null;
       if (id && this.sessionStore) this.sessionStore.endSession(id, 'error');
       this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
