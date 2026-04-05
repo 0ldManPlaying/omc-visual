@@ -41,4 +41,10 @@ export async function historyRoutes(fastify) {
   fastify.get('/metrics', async () => {
     return sessionStore.getAggregateMetrics();
   });
+
+  /** Recent unique prompts for quick-fill (Mission Control) */
+  fastify.get('/recent-prompts', async (req) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 5, 1), 20);
+    return sessionStore.getRecentPrompts(limit);
+  });
 }

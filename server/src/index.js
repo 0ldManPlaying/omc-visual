@@ -44,6 +44,7 @@ async function start() {
   const wsHub = new WebSocketHub();
   const sessionStore = new SessionStore();
   const cliCommander = new CLICommander(wsHub, sessionStore);
+  cliCommander.initializeOnServerStart();
   const stateWatcher = new StateWatcher(wsHub, sessionStore, () => cliCommander.getSession()?.id);
   const toolManager = new ToolManager();
   try {

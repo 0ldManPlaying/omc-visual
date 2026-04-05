@@ -1,13 +1,48 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Monitor, Square, Send, AlertTriangle, CheckCircle, Clock, GitCommit, Activity, Zap } from 'lucide-react';
+import {
+  Monitor,
+  Square,
+  XCircle,
+  Send,
+  AlertTriangle,
+  CheckCircle,
+  Clock,
+  GitCommit,
+  Activity,
+  Zap,
+  Copy,
+  Check,
+  Download,
+} from 'lucide-react';
 import { AnsiUp } from 'ansi_up';
 import { useStore } from '../stores/useStore';
 
+function stripAnsi(text) {
+  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+}
+
+function chunkPlainText(line) {
+  if (line.type === 'exit') {
+    return `— Session ended (code ${String(line.code)}) —`;
+  }
+  if (line.type === 'error') {
+    return line.message ?? '';
+  }
+  return stripAnsi(line.text ?? '');
+}
+
+function outputLinesPlaintext(lines) {
+  return lines.map(chunkPlainText).join('\n');
+}
+
 export default function LiveMonitor() {
-  const { session, outputLines, workerEvents, stateEvents, sendInput, fetchStatus } = useStore();
+  const { session, outputLines, workerEvents, stateEvents, sendInput, fetchStatus, killSession } = useStore();
   const [inputText, setInputText] = useState('');
   const [now, setNow] = useState(Date.now());
+  const [copyAllDone, setCopyAllDone] = useState(false);
+  const [copiedChunkKey, setCopiedChunkKey] = useState(null);
   const outputRef = useRef(null);
+  const copyAllTimeoutRef = useRef(null);
 
   const ansiUp = useMemo(() => {
     const a = new AnsiUp();
@@ -31,6 +66,48 @@ export default function LiveMonitor() {
     return () => clearInterval(t);
   }, [session]);
 
+  useEffect(() => {
+    return () => {
+      if (copyAllTimeoutRef.current) clearTimeout(copyAllTimeoutRef.current);
+    };
+  }, []);
+
+  const handleCopyAll = async () => {
+    const text = outputLinesPlaintext(outputLines);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyAllDone(true);
+      if (copyAllTimeoutRef.current) clearTimeout(copyAllTimeoutRef.current);
+      copyAllTimeoutRef.current = setTimeout(() => setCopyAllDone(false), 2000);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const handleCopyChunk = async (key, plain) => {
+    try {
+      await navigator.clipboard.writeText(plain);
+      setCopiedChunkKey(key);
+      setTimeout(() => {
+        setCopiedChunkKey((k) => (k === key ? null : k));
+      }, 2000);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const handleDownloadLog = () => {
+    const text = outputLinesPlaintext(outputLines);
+    const id = session?.id ?? 'unknown';
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `session-${id}-output.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleSend = () => {
     if (inputText.trim()) {
       sendInput(inputText.trim());
@@ -41,6 +118,10 @@ export default function LiveMonitor() {
   const handleStop = async () => {
     await fetch('/api/session/stop', { method: 'POST' });
     await fetchStatus();
+  };
+
+  const handleKill = async () => {
+    await killSession();
   };
 
   const allEvents = [...workerEvents, ...stateEvents]
@@ -75,6 +156,14 @@ export default function LiveMonitor() {
               <Square className="w-3 h-3" />
               Stop
             </button>
+            <button
+              type="button"
+              onClick={handleKill}
+              className="flex items-center gap-1.5 rounded-lg border border-red-500/40 px-3 py-1.5 text-[14px] text-red-400 hover:bg-red-500/10 transition-colors"
+            >
+              <XCircle className="w-3.5 h-3.5" />
+              Kill
+            </button>
           </div>
         )}
       </div>
@@ -96,29 +185,69 @@ export default function LiveMonitor() {
 
       <div className="flex-1 flex gap-4 min-h-0">
         <div className="flex-1 flex flex-col rounded-xl border border-[#1a2e28] bg-[#0a1210] overflow-hidden">
-          <div className="px-4 py-2.5 border-b border-[#1a2e28] flex items-center justify-between bg-[#0d1816]">
+          <div className="px-4 py-2.5 border-b border-[#1a2e28] flex items-center justify-between gap-3 flex-wrap bg-[#0d1816]">
             <div className="flex items-center gap-2">
               <Activity className="w-3.5 h-3.5 text-[#4a6a60]" />
               <span className="text-[14px] text-[#5a7a70] font-medium">Output</span>
             </div>
-            <span className="text-[13px] text-[#2a4e40]">{outputLines.length} chunks</span>
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              <span className="text-[13px] text-[#2a4e40] tabular-nums">{outputLines.length} chunks</span>
+              <button
+                type="button"
+                disabled={outputLines.length === 0}
+                onClick={handleCopyAll}
+                className="flex items-center gap-1.5 rounded-lg border border-[#1a3530] bg-[#0a1612] px-2.5 py-1 text-[13px] text-[#8aaa9f] hover:bg-[#12221e] hover:text-[#c8e0d4] disabled:opacity-40 disabled:pointer-events-none transition-colors"
+              >
+                {copyAllDone ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    Copied!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    Copy all
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                disabled={outputLines.length === 0}
+                onClick={handleDownloadLog}
+                className="flex items-center gap-1.5 rounded-lg border border-[#1a3530] bg-[#0a1612] px-2.5 py-1 text-[13px] text-[#8aaa9f] hover:bg-[#12221e] hover:text-[#c8e0d4] disabled:opacity-40 disabled:pointer-events-none transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Download log
+              </button>
+            </div>
           </div>
 
           <div
             ref={outputRef}
-            className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-[1.7] bg-[#0a0f0d]"
+            className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-[1.7] bg-[#0a0f0d] select-text cursor-text [selection:bg-emerald-500/30]"
           >
             {outputLines.length === 0 ? (
-              <div className="text-[14px] text-[#2a4e40] text-center mt-12">
+              <div className="text-[14px] text-[#2a4e40] text-center mt-12 select-none cursor-default">
                 <div className="w-12 h-12 rounded-xl bg-[#12221e] border border-[#1a3530] flex items-center justify-center mx-auto mb-3">
                   <Monitor className="w-6 h-6 text-[#2a4e40]" />
                 </div>
                 {session ? 'Waiting for output…' : 'No active session'}
               </div>
             ) : (
-              outputLines.map((line, i) => (
-                <OutputChunk key={`${line.timestamp || ''}-${i}`} line={line} ansiUp={ansiUp} />
-              ))
+              outputLines.map((line, i) => {
+                const chunkKey = `${line.timestamp || ''}-${i}`;
+                return (
+                  <OutputChunk
+                    key={chunkKey}
+                    chunkKey={chunkKey}
+                    line={line}
+                    ansiUp={ansiUp}
+                    plainText={chunkPlainText(line)}
+                    copiedChunkKey={copiedChunkKey}
+                    onCopyChunk={handleCopyChunk}
+                  />
+                );
+              })
             )}
           </div>
 
@@ -164,27 +293,56 @@ export default function LiveMonitor() {
   );
 }
 
-function OutputChunk({ line, ansiUp }) {
+function OutputChunk({ chunkKey, line, ansiUp, plainText, copiedChunkKey, onCopyChunk }) {
+  const chunkCopied = copiedChunkKey === chunkKey;
+
+  const copyBtn = (
+    <button
+      type="button"
+      title="Copy this chunk"
+      className="absolute top-1 right-1 z-10 rounded-md border border-[#1a2e28] bg-[#0d1816]/95 p-1.5 text-[#8aaa9f] opacity-0 shadow-sm transition-opacity hover:bg-[#12221e] hover:text-[#c8e0d4] group-hover:opacity-100"
+      onClick={(e) => {
+        e.stopPropagation();
+        onCopyChunk(chunkKey, plainText);
+      }}
+    >
+      {chunkCopied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+    </button>
+  );
+
   if (line.type === 'exit') {
     return (
-      <div className="text-amber-400/90 my-2 border-t border-[#1a2e28] pt-2">
-        — Session ended (code {String(line.code)}) —
+      <div className="group relative my-2 border-t border-[#1a2e28] pt-2 pr-10">
+        {copyBtn}
+        <div className="text-amber-400/90 whitespace-pre-wrap break-words select-text [selection:bg-emerald-500/30]">
+          — Session ended (code {String(line.code)}) —
+        </div>
       </div>
     );
   }
   if (line.type === 'error') {
-    return <div className="text-red-400 whitespace-pre-wrap break-words">{line.message}</div>;
+    return (
+      <div className="group relative pr-10">
+        {copyBtn}
+        <div className="whitespace-pre-wrap break-words text-red-400 select-text [selection:bg-emerald-500/30]">
+          {line.message}
+        </div>
+      </div>
+    );
   }
   const raw = line.text ?? '';
   const html = ansiUp.ansi_to_html(raw);
   const dim = line.type === 'stderr';
   return (
-    <div
-      className={`whitespace-pre-wrap break-words ${dim ? 'opacity-80' : ''} ${
-        line.type === 'stderr' ? 'text-red-300/80' : 'text-[#c8e0d4]'
-      }`}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <div className={`group relative pr-10 ${dim ? 'opacity-80' : ''}`}>
+      {copyBtn}
+      <div
+        className={`whitespace-pre-wrap break-words select-text [selection:bg-emerald-500/30] ${
+          line.type === 'stderr' ? 'text-red-300/80' : 'text-[#c8e0d4]'
+        }`}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    </div>
   );
 }
 

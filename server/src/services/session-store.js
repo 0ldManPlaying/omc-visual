@@ -88,7 +88,13 @@ export class SessionStore {
 
     const ec = exitCode ?? 0;
     const status =
-      ec === 'stopped' ? 'stopped' : ec === 'error' ? 'failed' : 'completed';
+      ec === 'stopped'
+        ? 'stopped'
+        : ec === 'error'
+          ? 'failed'
+          : ec === 'killed'
+            ? 'killed'
+            : 'completed';
 
     this.db.prepare(`
       UPDATE sessions SET ended_at = ?, duration_ms = ?, exit_code = ?, status = ?
@@ -147,6 +153,28 @@ export class SessionStore {
 
   getSession(sessionId) {
     return this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+  }
+
+  /** Last N unique prompts (most recent first), for Mission Control suggestions */
+  getRecentPrompts(limit = 5) {
+    const rows = this.db
+      .prepare(
+        `SELECT prompt FROM sessions
+         WHERE prompt IS NOT NULL AND length(trim(prompt)) > 0
+         ORDER BY started_at DESC
+         LIMIT 200`
+      )
+      .all();
+    const seen = new Set();
+    const prompts = [];
+    for (const { prompt } of rows) {
+      const p = String(prompt).trim();
+      if (!p || seen.has(p)) continue;
+      seen.add(p);
+      prompts.push(p);
+      if (prompts.length >= limit) break;
+    }
+    return { prompts };
   }
 
   getSessionEvents(sessionId, { limit = 200 } = {}) {

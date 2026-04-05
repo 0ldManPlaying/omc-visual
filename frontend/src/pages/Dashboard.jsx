@@ -7,6 +7,7 @@ export default function Dashboard() {
   const {
     serverStatus, connected, session, workerEvents, stateEvents,
     clawhipInstall, installClawhip, startClawhipDaemon, stopClawhipDaemon, scaffoldClawhipConfig,
+    stopSession, killSession,
   } = useStore();
   const navigate = useNavigate();
   const omc = serverStatus?.omc;
@@ -104,13 +105,41 @@ export default function Dashboard() {
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-[16px] font-semibold text-white">Current session</h2>
             {session && (
-              <button
-                onClick={() => navigate('/monitor')}
-                className="flex items-center gap-1 text-[14px] text-emerald-400 hover:text-emerald-300 transition-colors"
-              >
-                <Eye className="w-3.5 h-3.5" />
-                View live
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  title="Open live monitor"
+                  onClick={() => navigate('/monitor')}
+                  className="flex items-center gap-1 text-[14px] text-emerald-400 hover:text-emerald-300 transition-colors"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  View live
+                </button>
+                <button
+                  type="button"
+                  title="Resume / live monitor"
+                  onClick={() => navigate('/monitor')}
+                  className="w-5 h-5 flex items-center justify-center rounded hover:bg-[#1a2e28] transition-colors"
+                >
+                  <Play className="w-[14px] h-[14px] text-emerald-400" strokeWidth={2} />
+                </button>
+                <button
+                  type="button"
+                  title="Graceful stop"
+                  onClick={() => stopSession()}
+                  className="w-5 h-5 flex items-center justify-center rounded hover:bg-[#1a2e28] transition-colors"
+                >
+                  <Pause className="w-[14px] h-[14px] text-amber-400" strokeWidth={2} />
+                </button>
+                <button
+                  type="button"
+                  title="Force kill session"
+                  onClick={() => killSession()}
+                  className="w-5 h-5 flex items-center justify-center rounded hover:bg-[#1a2e28] transition-colors"
+                >
+                  <Square className="w-[14px] h-[14px] text-red-400" strokeWidth={2} />
+                </button>
+              </div>
             )}
           </div>
 

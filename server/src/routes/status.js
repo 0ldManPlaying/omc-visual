@@ -17,6 +17,10 @@ export async function statusRoutes(fastify) {
         uptime: process.uptime(),
         nodeVersion: process.version,
       },
+      paths: {
+        homeDir: homedir(),
+        suggestedWorkdir: process.cwd(),
+      },
       omc: getOMCStatus(),
       clawhip: getClawhipStatus(),
       session: cliCommander.getSession(),

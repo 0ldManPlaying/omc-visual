@@ -64,7 +64,7 @@ export const useStore = create((set, get) => ({
             break;
 
           case 'session':
-            if (msg.type === 'ended' || msg.type === 'stopped') {
+            if (msg.type === 'ended' || msg.type === 'stopped' || msg.type === 'killed') {
               set({ session: null });
               break;
             }
@@ -171,6 +171,36 @@ export const useStore = create((set, get) => ({
       return await res.json();
     } catch {
       return { status: 'error' };
+    }
+  },
+
+  stopSession: async () => {
+    try {
+      await fetch('/api/session/stop', { method: 'POST' });
+      await get().fetchStatus();
+    } catch {
+      await get().fetchStatus();
+    }
+  },
+
+  killSession: async () => {
+    try {
+      await fetch('/api/session/kill', { method: 'POST' });
+      await get().fetchStatus();
+    } catch {
+      await get().fetchStatus();
+    }
+  },
+
+  cleanupSessions: async () => {
+    try {
+      const res = await fetch('/api/session/cleanup', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      await get().fetchStatus();
+      return { ok: res.ok, ...data };
+    } catch (e) {
+      await get().fetchStatus();
+      return { ok: false, error: e.message || 'request failed' };
     }
   },
 

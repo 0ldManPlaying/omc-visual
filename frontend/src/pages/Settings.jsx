@@ -1,12 +1,15 @@
 import { useState, useEffect } from 'react';
 import { Settings as SettingsIcon, Save, RefreshCw, Server, Zap, Eye, Check, AlertCircle } from 'lucide-react';
+import { useStore } from '../stores/useStore';
 
 export default function Settings() {
+  const cleanupSessions = useStore((s) => s.cleanupSessions);
   const [settings, setSettings] = useState(null);
   const [clawhipConfig, setClawhipConfig] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(null);
   const [message, setMessage] = useState(null);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
 
   useEffect(() => {
     fetchSettings();
@@ -30,6 +33,23 @@ export default function Settings() {
   const showMessage = (text, type = 'success') => {
     setMessage({ text, type });
     setTimeout(() => setMessage(null), 3000);
+  };
+
+  const handleCleanupOrphans = async () => {
+    setCleanupBusy(true);
+    try {
+      const result = await cleanupSessions();
+      if (result.ok && typeof result.killed === 'number') {
+        showMessage(`Cleaned: ${result.killed} session${result.killed === 1 ? '' : 's'} killed`);
+      } else if (result.ok) {
+        showMessage('Cleanup completed');
+      } else {
+        showMessage(result.error || 'Cleanup failed', 'error');
+      }
+    } catch {
+      showMessage('Cleanup failed', 'error');
+    }
+    setCleanupBusy(false);
   };
 
   const saveClawhipConfig = async () => {
@@ -164,6 +184,19 @@ export default function Settings() {
               </pre>
             </div>
           )}
+          <div className="mt-4 pt-4 border-t border-[#1a2e28]">
+            <button
+              type="button"
+              onClick={handleCleanupOrphans}
+              disabled={cleanupBusy}
+              className="rounded-lg border border-red-500/40 px-4 py-2 text-[14px] text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-50 disabled:pointer-events-none"
+            >
+              {cleanupBusy ? 'Cleaning up…' : 'Kill all orphan tmux sessions'}
+            </button>
+            <p className="mt-2 text-[13px] text-[#3a5a50]">
+              Removes every <span className="font-mono text-[#5a7a70]">omc-session-*</span> tmux session and reconciles the database.
+            </p>
+          </div>
         </Section>
       </div>
     </div>
