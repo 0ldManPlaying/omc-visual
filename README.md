@@ -40,7 +40,7 @@ It integrates with [Clawhip](https://github.com/Yeachan-Heo/clawhip) for real-ti
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/user/omc-visual.git
+git clone https://github.com/0ldManPlaying/omc-visual.git
 cd omc-visual
 
 # 2. Install dependencies and build the frontend
