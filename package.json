@@ -1,0 +1,26 @@
+{
+  "name": "omc-visual",
+  "version": "0.1.0",
+  "description": "Visual interface for oh-my-claudecode — multi-agent orchestration in your browser",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:frontend\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "start": "cd server && npm start",
+    "start:bg": "bash scripts/start-background.sh",
+    "setup": "npm install && cd server && npm install && cd ../frontend && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/omc-visual"
+  }
+}
