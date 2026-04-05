@@ -41,17 +41,15 @@ function useClaudePrintMode(mode) {
 }
 
 /**
- * Shell one-liner for tmux/bash: `claude` + optional `-p`, `--dangerously-skip-permissions` (autopilot).
- * Matches oh-my-claudecode's claude contract (see bridge runtime-cli buildLaunchArgs).
+ * Shell one-liner for tmux/bash: `claude` + optional `-p` + `--dangerously-skip-permissions` when print mode.
+ * Non-interactive `-p` cannot answer permission prompts; skip is required for all -p modes (not only autopilot).
  */
 function buildClaudeBashInvocation(mode, fullPrompt, { model } = {}) {
   const quoted = JSON.stringify(fullPrompt);
   const modelPart = model ? ` --model ${JSON.stringify(model)}` : '';
   const printPart = useClaudePrintMode(mode) ? ' -p' : '';
-  if (mode === 'autopilot') {
-    return `claude${printPart} --dangerously-skip-permissions${modelPart} ${quoted}`;
-  }
-  return `claude${printPart}${modelPart} ${quoted}`;
+  const skipPart = useClaudePrintMode(mode) ? ' --dangerously-skip-permissions' : '';
+  return `claude${printPart}${skipPart}${modelPart} ${quoted}`;
 }
 
 /**
@@ -73,7 +71,7 @@ function buildClaudeSpawnArgs(mode, fullPrompt, { model } = {}) {
   if (model) {
     args.push('--model', model);
   }
-  if (mode === 'autopilot') {
+  if (useClaudePrintMode(mode)) {
     args.push('--dangerously-skip-permissions', fullPrompt);
   } else {
     args.push(fullPrompt);
