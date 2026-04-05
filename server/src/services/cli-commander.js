@@ -3,9 +3,6 @@ import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join, normalize } from 'path';
 
-/** Printed by Claude when done; tmux poll detects this to end the session cleanly. */
-const OMC_FINISH_MARKER = '===OMC_SESSION_COMPLETE===';
-
 function resolveClawhipBin() {
   const cargo = join(homedir(), '.cargo', 'bin', 'clawhip');
   if (existsSync(cargo)) return cargo;
@@ -57,7 +54,7 @@ function buildClaudeSpawnArgs(mode, fullPrompt, { model } = {}) {
 /**
  * CLI Commander — spawns OMC sessions via Clawhip tmux wrapper when available,
  * else direct `claude`. Tmux pane output is polled to WebSocket `output` channel.
- * Auto-completion: only when tmux capture-pane fails (pane/session gone), not heuristics.
+ * Auto-completion: tmux capture-pane failure (pane gone), bash prompt after Claude Code exits, or Stop/Kill.
  */
 export class CLICommander {
   constructor(wsHub, sessionStore = null) {
@@ -348,8 +345,6 @@ export class CLICommander {
       cliBody += `\n\n(OMC Visual: prefer responses under ~${Number(maxTok)} output tokens where practical.)`;
     }
 
-    cliBody += `\n\nIMPORTANT: When you have fully completed the task, print exactly this line on its own as your final output:\n${OMC_FINISH_MARKER}`;
-
     const model =
       typeof options.model === 'string' && options.model.trim()
         ? options.model.trim().toLowerCase()
@@ -513,8 +508,11 @@ export class CLICommander {
     this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
   }
 
-  /** Immediate completion when Claude prints OMC_FINISH_MARKER in the tmux pane (no 5s delay). */
-  completeSessionAfterFinishMarker(sessionId) {
+  /**
+   * End session immediately when tmux shows bash again (Claude Code exited) — no 5s delay.
+   * @param {string} reason — e.g. 'bash_prompt' for WebSocket clients
+   */
+  completeSessionAfterFinishMarker(sessionId, reason = 'bash_prompt') {
     if (!this.session || this.session.id !== sessionId) return;
     this.clearCompletionFinalizeTimer();
     this.clearTmuxPoll();
@@ -545,7 +543,7 @@ export class CLICommander {
     this.wsHub.broadcastChannel('session', {
       type: 'completed',
       session: snap,
-      reason: 'finish_marker',
+      reason,
     });
     this.wsHub.broadcastChannel('session', { type: 'ended', session: null });
   }
@@ -802,6 +800,7 @@ export class CLICommander {
     this._lastTeamPaneSig = null;
     // Fresh baseline so we never skip the first emit because of a stale buffer from a prior poll/session.
     this._lastPaneText = '';
+    this._pollStartedAt = Date.now();
 
     const tmuxSession = this.tmuxSessionName;
     const leadPaneTarget = `${tmuxSession}:0.0`;
@@ -817,7 +816,7 @@ export class CLICommander {
       try {
         const text = execFileSync(
           'tmux',
-          ['capture-pane', '-t', leadPaneTarget, '-p', '-S', '-400'],
+          ['capture-pane', '-t', leadPaneTarget, '-p', '-S', '-500'],
           { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 }
         );
         console.log('[tmux-poll] Capture result:', text.length, 'chars');
@@ -830,8 +829,11 @@ export class CLICommander {
           text !== this._lastPaneText
         );
 
-        if (text.includes(OMC_FINISH_MARKER)) {
-          console.log('[tmux-poll] Finish marker detected! Session complete.');
+        const lines = text.split('\n').filter((l) => l.trim());
+        const lastNonEmpty = lines[lines.length - 1] || '';
+        const isBashPrompt = /\w+@\w+:.+\$\s*$/.test(lastNonEmpty);
+        if (isBashPrompt && Date.now() - this._pollStartedAt > 15000) {
+          console.log('[tmux-poll] Bash prompt detected, Claude Code has exited:', lastNonEmpty);
           if (text !== this._lastPaneText) {
             this._lastPaneText = text;
             this.emitOutput(sessionId, {
@@ -846,7 +848,7 @@ export class CLICommander {
             sessionId,
             text: '\n✅ Task completed\n',
           });
-          this.completeSessionAfterFinishMarker(sessionId);
+          this.completeSessionAfterFinishMarker(sessionId, 'bash_prompt');
           return;
         }
 
